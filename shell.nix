@@ -19,9 +19,10 @@ let
       faster-whisper # >=1.0 (Check availability and version in your nixpkgs)
       numpy # >=1.2
       pydantic # >=2.0
-      pytest # For running tests
 
-      # Build system dependencies
+      # Build dependencies
+      pytest
+      pytest-asyncio
       setuptools # >=45
       wheel
     ];
