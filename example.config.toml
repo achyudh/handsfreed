@@ -1,98 +1,49 @@
-# Configuration file for Handsfree
-# Location: ~/.config/handsfree/config.toml
+# Example configuration for handsfreed daemon
 
-# -----------------------------------------------------------------------------
-# Whisper Model Configuration
-# Settings related to the speech-to-text model (faster-whisper).
-# -----------------------------------------------------------------------------
 [whisper]
+# Model to use (supported models: tiny.en, base.en, small.en, medium.en, large)
+model = "small.en"
 
-# Model identifier used by faster-whisper.
-# Examples: "tiny.en", "base", "small.en", "small", "medium", "large-v3", "distil-large-v3"
-# The library will automatically download and cache the model specified here if it's not found locally.
-# This field is essential for transcription.
-model = "base.en" # Recommended starting point, change based on needs/resources
+# Device to use for inference (auto, cpu, cuda)
+device = "auto"
 
-# Hardware device for running the model.
-# Options: "auto", "cpu", "cuda" (if NVIDIA GPU and CUDA toolkit are installed).
-# "auto" will prefer "cuda" if available, otherwise "cpu".
-device = "cpu"
+# Compute type for inference (auto, float32, float16, int8)
+compute_type = "auto"
 
-# Computation type for the model inference. Affects speed and VRAM/RAM usage.
-# Options depend on the device and model, e.g.:
-#   - For CPU: "int8" (fastest, lower quality), "int16", "float32"
-#   - For CUDA: "int8_float16", "float16" (good balance), "int8"
-#   - "auto": Selects a reasonable default based on device.
-# Check faster-whisper documentation for details.
-compute_type = "int8"
+# Optional language code (leave empty for auto-detect)
+language = "en"
 
-# Optional: Specify the language code (ISO 639-1, e.g., "en", "es", "fr", "de").
-# If commented out or empty, faster-whisper will attempt to auto-detect the language.
-# language = "en"
+# Beam size for search (1-10, higher is slower but more accurate)
+beam_size = 5
 
-# Optional: Beam size used during decoding. Larger values can increase accuracy but slow down inference.
-# Faster-whisper default is typically 5.
-# beam_size = 5
+# Enable voice activity detection filtering (experimental)
+vad_filter = false
 
-# Optional: Parameters for Voice Activity Detection (VAD).
-# Faster-whisper has a built-in VAD filter, and we also use silence detection
-# to determine when to finalize a transcription segment.
 [vad]
-# Speech probability threshold for VAD. Higher values are stricter. (Default: 0.5)
-# threshold = 0.5
+# Threshold for voice detection (0.0-1.0)
+threshold = 0.5
 
-# Minimum duration of speech in milliseconds to be considered valid. (Default: 250)
-# min_speech_duration_ms = 250
+# Minimum duration for a speech segment (ms)
+min_speech_duration_ms = 250
 
-# **IMPORTANT**: Duration of silence in milliseconds after speech to automatically
-# finalize and output the transcribed segment. Adjust based on your speaking style.
-# (Default: 1500 ms = 1.5 seconds)
+# Minimum duration for a silence segment (ms)
 min_silence_duration_ms = 1500
 
-
-# -----------------------------------------------------------------------------
-# Output Configuration (Phase 1: Explicit Commands)
-# Define the external commands used to output the transcribed text.
-# -----------------------------------------------------------------------------
 [output]
+# Command to execute for keyboard output
+keyboard_command = "xdotool type --delay 0"
 
-# Command to execute for keyboard simulation.
-# The transcribed text will be piped to this command's standard input (stdin).
-# **REQUIRED FOR PHASE 1**: You MUST configure this based on your system (Wayland/X11).
-# Example for Wayland using wtype:
-#   keyboard_command = "wtype -"
-# Example for X11 using xdotool:
-#   keyboard_command = "xdotool type --clearmodifiers --file -"
-keyboard_command = ""
+# Command to execute for clipboard output
+clipboard_command = "wl-copy"
 
-# Command to execute for copying text to the system clipboard.
-# The transcribed text will be piped to this command's standard input (stdin).
-# **REQUIRED FOR PHASE 1**: You MUST configure this based on your system (Wayland/X11).
-# Example for Wayland using wl-copy:
-#   clipboard_command = "wl-copy"
-# Example for X11 using xclip:
-#   clipboard_command = "xclip -selection clipboard -in"
-clipboard_command = ""
-
-
-# -----------------------------------------------------------------------------
-# Daemon Process Configuration
-# Settings related to the handsfreed background process.
-# -----------------------------------------------------------------------------
 [daemon]
-
-# Optional: Path to the log file for handsfreed.
-# If commented out, defaults to: ~/.local/state/handsfree/handsfreed.log
-# log_file = "/path/to/custom/handsfree.log"
-
-# Optional: Logging level for the daemon.
-# Options: "DEBUG", "INFO", "WARNING", "ERROR"
-# Defaults to "INFO".
+# Log level (DEBUG, INFO, WARNING, ERROR)
 log_level = "INFO"
 
-# Optional: Path for the Unix Domain Socket used for communication between
-# handsfreectl and handsfreed.
-# If commented out, defaults to: $XDG_RUNTIME_DIR/handsfree/daemon.sock
-# (if $XDG_RUNTIME_DIR is set and the directory can be created),
-# otherwise falls back to: /tmp/handsfree-<YourUserID>.sock
-# socket_path = "/custom/path/handsfree.sock"
+# Optional custom log file path
+# Default: ~/.local/state/handsfree/handsfreed.log
+# log_file = "/var/log/handsfreed.log"
+
+# Optional custom socket path
+# Default: $XDG_RUNTIME_DIR/handsfree/daemon.sock or /tmp/handsfree-$USER.sock
+# socket_path = "/var/run/handsfree/daemon.sock"

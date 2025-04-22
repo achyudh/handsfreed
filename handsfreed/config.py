@@ -1,3 +1,5 @@
+"""Configuration handling for handsfreed daemon."""
+
 import tomllib
 import os
 import getpass
@@ -7,10 +9,18 @@ from pydantic import BaseModel, Field, field_validator
 
 
 def get_default_config_path() -> Path:
-    return Path.home() / ".config" / "handsfree" / "config.toml"
+    """Get the default config file path following XDG spec."""
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config:
+        base_dir = Path(xdg_config)
+    else:
+        base_dir = Path.home() / ".config"
+
+    return base_dir / "handsfree" / "config.toml"
 
 
 def get_default_socket_path() -> Path:
+    """Get the default socket path following XDG spec."""
     xdg_runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
     if xdg_runtime_dir:
         sock_dir = Path(xdg_runtime_dir) / "handsfree"
@@ -31,12 +41,21 @@ def get_default_socket_path() -> Path:
 
 
 def get_default_log_path() -> Path:
-    log_dir = Path.home() / ".local" / "state" / "handsfree"
+    """Get the default log file path following XDG spec."""
+    xdg_state = os.environ.get("XDG_STATE_HOME")
+    if xdg_state:
+        base_dir = Path(xdg_state)
+    else:
+        base_dir = Path.home() / ".local" / "state"
+
+    log_dir = base_dir / "handsfree"
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir / "handsfreed.log"
 
 
 class VadConfig(BaseModel):
+    """Voice Activity Detection configuration."""
+
     threshold: float = 0.5
     min_speech_duration_ms: int = 250
     min_silence_duration_ms: int = 1500
@@ -50,6 +69,8 @@ class VadConfig(BaseModel):
 
 
 class WhisperConfig(BaseModel):
+    """Whisper model configuration."""
+
     model: str = "small.en"  # Default model
     device: str = "auto"
     compute_type: str = "auto"
@@ -73,8 +94,10 @@ class WhisperConfig(BaseModel):
 
 
 class OutputConfig(BaseModel):
-    keyboard_command: str
-    clipboard_command: str
+    """Output command configuration."""
+
+    keyboard_command: str = "xdotool type --delay 0"  # Sensible default for X11/Wayland
+    clipboard_command: str = "wl-copy"  # Default to Wayland clipboard
 
     @field_validator("keyboard_command", "clipboard_command")
     @classmethod
@@ -85,6 +108,8 @@ class OutputConfig(BaseModel):
 
 
 class DaemonConfig(BaseModel):
+    """Daemon runtime configuration."""
+
     log_level: str = "INFO"
     log_file: Optional[Path] = None
     socket_path: Optional[Path] = None
@@ -108,19 +133,35 @@ class DaemonConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    whisper: WhisperConfig
+    """Root configuration."""
+
+    whisper: WhisperConfig = Field(default_factory=WhisperConfig)
     vad: VadConfig = Field(default_factory=VadConfig)
-    output: OutputConfig
+    output: OutputConfig = Field(default_factory=OutputConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:
-    """Loads and validates the configuration from a TOML file."""
+    """Load and validate configuration.
+
+    If path is not provided, looks for config in standard locations.
+    If no config file is found, returns default configuration.
+
+    Args:
+        path: Optional path to config file.
+
+    Returns:
+        Validated AppConfig instance.
+
+    Raises:
+        ValueError: If config file exists but has invalid format/content.
+        OSError: If config file exists but can't be read.
+    """
     if path is None:
         path = get_default_config_path()
 
     if not path.exists():
-        raise FileNotFoundError(f"Configuration file not found: {path}")
+        return AppConfig()  # Use defaults
 
     try:
         with open(path, "rb") as f:
@@ -131,7 +172,6 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         raise OSError(f"Error reading file: {path}\n{e}") from e
 
     try:
-        app_config = AppConfig(**config_data)
-        return app_config
+        return AppConfig(**config_data)
     except Exception as e:
         raise ValueError(f"Configuration validation failed: {e}")

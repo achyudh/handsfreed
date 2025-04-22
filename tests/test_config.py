@@ -1,3 +1,5 @@
+"""Tests for configuration handling."""
+
 import pytest
 from pathlib import Path
 import os
@@ -79,10 +81,13 @@ def test_load_config_success(mock_config_file):
     assert config.daemon.log_level == "DEBUG"
 
 
-def test_load_config_file_not_found():
-    """Test handling of non-existent config file."""
-    with pytest.raises(FileNotFoundError):
-        load_config(Path("/nonexistent/config.toml"))
+def test_load_config_missing_uses_defaults():
+    """Test loading with no config file uses defaults."""
+    config = load_config(Path("/nonexistent/config.toml"))
+    assert isinstance(config, AppConfig)
+    assert config.whisper.model == "small.en"  # Check default
+    assert config.output.keyboard_command == "xdotool type --delay 0"  # Check default
+    assert config.daemon.log_level == "INFO"  # Check default
 
 
 def test_load_config_invalid_toml(tmp_path):
@@ -91,15 +96,6 @@ def test_load_config_invalid_toml(tmp_path):
     invalid_file.write_text("invalid { toml = syntax")
     with pytest.raises(ValueError, match="Error decoding TOML file"):
         load_config(invalid_file)
-
-
-def test_load_config_missing_required():
-    """Test validation of missing required fields."""
-    config_data = {
-        "whisper": {"model": "base"},  # Missing output section
-    }
-    with pytest.raises(ValueError, match="Field required"):
-        AppConfig(**config_data)
 
 
 def test_vad_config_validation():
@@ -141,9 +137,15 @@ def test_daemon_config_validation():
 
 
 def test_default_config_path():
-    """Test default config path construction."""
-    expected = Path.home() / ".config" / "handsfree" / "config.toml"
-    assert get_default_config_path() == expected
+    """Test config path follows XDG spec."""
+    with patch.dict(os.environ, {"XDG_CONFIG_HOME": "/xdg/config"}, clear=True):
+        expected = Path("/xdg/config/handsfree/config.toml")
+        assert get_default_config_path() == expected
+
+    # Test fallback to ~/.config
+    with patch.dict(os.environ, {}, clear=True):
+        expected = Path.home() / ".config" / "handsfree" / "config.toml"
+        assert get_default_config_path() == expected
 
 
 @pytest.mark.parametrize(
@@ -170,8 +172,16 @@ def test_default_socket_path(xdg_set, expected_base):
 
 
 def test_default_log_path():
-    """Test default log path construction."""
-    with patch("pathlib.Path.mkdir"):
+    """Test log path follows XDG spec."""
+    with (
+        patch.dict(os.environ, {"XDG_STATE_HOME": "/xdg/state"}, clear=True),
+        patch("pathlib.Path.mkdir"),
+    ):
+        expected = Path("/xdg/state/handsfree/handsfreed.log")
+        assert get_default_log_path() == expected
+
+    # Test fallback to ~/.local/state
+    with patch.dict(os.environ, {}, clear=True), patch("pathlib.Path.mkdir"):
         expected = Path.home() / ".local" / "state" / "handsfree" / "handsfreed.log"
         assert get_default_log_path() == expected
 
@@ -185,9 +195,6 @@ def test_computed_paths():
     )
 
     # Test defaults when not specified
-    minimal_config = AppConfig(
-        whisper={"model": "base"},
-        output={"keyboard_command": "test", "clipboard_command": "test"},
-    )
+    minimal_config = AppConfig()  # All defaults
     assert minimal_config.daemon.computed_log_file == get_default_log_path()
     assert minimal_config.daemon.computed_socket_path == get_default_socket_path()
