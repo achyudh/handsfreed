@@ -46,6 +46,7 @@ def transcriber():
     trans.start = AsyncMock(return_value=True)
     trans.stop = AsyncMock()
     trans.set_current_output_mode = MagicMock()
+    trans.output_queue = asyncio.Queue()  # Real queue for output handler
     return trans
 
 
@@ -132,7 +133,7 @@ async def test_server_existing_socket(ipc_server, socket_path):
 
 @pytest.mark.asyncio
 async def test_start_command_success(
-    ipc_server, socket_path, state_manager, transcriber, audio_capture
+    ipc_server, socket_path, state_manager, transcriber, audio_capture, output_handler
 ):
     """Test successful Start command."""
     await ipc_server.start()
@@ -145,10 +146,11 @@ async def test_start_command_success(
     # Check response
     assert response["response_type"] == "ack"
 
-    # Verify handlers were called
+    # Verify handlers were called in correct order
+    output_handler.start.assert_awaited_once_with(transcriber.output_queue)
     transcriber.set_current_output_mode.assert_called_with(CliOutputMode.KEYBOARD)
-    transcriber.start.assert_called_once()
-    audio_capture.start.assert_called_once()
+    transcriber.start.assert_awaited_once()
+    audio_capture.start.assert_awaited_once()
 
     # Check state
     assert state_manager.current_state == DaemonStateEnum.LISTENING
@@ -156,7 +158,7 @@ async def test_start_command_success(
 
 @pytest.mark.asyncio
 async def test_start_command_transcriber_failure(
-    ipc_server, socket_path, state_manager, transcriber, audio_capture
+    ipc_server, socket_path, state_manager, transcriber, audio_capture, output_handler
 ):
     """Test Start command when transcriber fails."""
     await ipc_server.start()
@@ -171,8 +173,9 @@ async def test_start_command_transcriber_failure(
     assert response["response_type"] == "error"
     assert "Failed to start" in response["message"]
 
-    # Audio capture should not be started
-    audio_capture.start.assert_not_called()
+    # Check cleanup order
+    output_handler.stop.assert_awaited_once()
+    audio_capture.start.assert_not_awaited()  # Should not start audio
 
     # Check state
     assert state_manager.current_state == DaemonStateEnum.ERROR
@@ -180,7 +183,7 @@ async def test_start_command_transcriber_failure(
 
 @pytest.mark.asyncio
 async def test_start_command_audio_failure(
-    ipc_server, socket_path, state_manager, transcriber, audio_capture
+    ipc_server, socket_path, state_manager, transcriber, audio_capture, output_handler
 ):
     """Test Start command when audio capture fails."""
     await ipc_server.start()
@@ -195,8 +198,10 @@ async def test_start_command_audio_failure(
     assert response["response_type"] == "error"
     assert "Failed to start" in response["message"]
 
-    # Transcriber should be stopped
-    transcriber.stop.assert_called_once()
+    # Check cleanup order
+    audio_capture.start.assert_awaited_once()  # Should attempt to start
+    transcriber.stop.assert_awaited_once()  # Should stop transcriber
+    output_handler.stop.assert_awaited_once()  # Should stop output
 
     # Check state
     assert state_manager.current_state == DaemonStateEnum.ERROR
@@ -204,7 +209,7 @@ async def test_start_command_audio_failure(
 
 @pytest.mark.asyncio
 async def test_start_while_running(
-    ipc_server, socket_path, state_manager, transcriber, audio_capture
+    ipc_server, socket_path, state_manager, transcriber, audio_capture, output_handler
 ):
     """Test Start command while already running."""
     await ipc_server.start()
@@ -218,13 +223,14 @@ async def test_start_while_running(
     # Should succeed but only change mode
     assert response["response_type"] == "ack"
     transcriber.set_current_output_mode.assert_called_with(CliOutputMode.CLIPBOARD)
-    transcriber.start.assert_not_called()  # Should not restart
-    audio_capture.start.assert_not_called()
+    output_handler.start.assert_not_awaited()  # Should not restart
+    transcriber.start.assert_not_awaited()
+    audio_capture.start.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_stop_command_success(
-    ipc_server, socket_path, state_manager, transcriber, audio_capture
+    ipc_server, socket_path, state_manager, transcriber, audio_capture, output_handler
 ):
     """Test successful Stop command."""
     await ipc_server.start()
@@ -236,16 +242,19 @@ async def test_stop_command_success(
     # Check response
     assert response["response_type"] == "ack"
 
-    # Verify handlers were called
-    audio_capture.stop.assert_called_once()
-    transcriber.stop.assert_called_once()
+    # Verify handlers were stopped in correct order
+    audio_capture.stop.assert_awaited_once()
+    transcriber.stop.assert_awaited_once()
+    output_handler.stop.assert_awaited_once()
 
     # Check state
     assert state_manager.current_state == DaemonStateEnum.IDLE
 
 
 @pytest.mark.asyncio
-async def test_stop_when_idle(ipc_server, socket_path, transcriber, audio_capture):
+async def test_stop_when_idle(
+    ipc_server, socket_path, transcriber, audio_capture, output_handler
+):
     """Test Stop command when already idle."""
     await ipc_server.start()
 
@@ -254,8 +263,9 @@ async def test_stop_when_idle(ipc_server, socket_path, transcriber, audio_captur
 
     # Should succeed but do nothing
     assert response["response_type"] == "ack"
-    transcriber.stop.assert_not_called()
-    audio_capture.stop.assert_not_called()
+    output_handler.stop.assert_not_awaited()
+    transcriber.stop.assert_not_awaited()
+    audio_capture.stop.assert_not_awaited()
 
 
 @pytest.mark.asyncio

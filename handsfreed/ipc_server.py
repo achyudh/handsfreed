@@ -91,20 +91,26 @@ class IPCServer:
             True if started successfully, False otherwise
         """
         try:
-            # Set transcriber output mode before starting capture
-            self.transcriber.set_current_output_mode(output_mode)
+            # Start components in order: output -> transcriber -> audio
+            # This ensures each component's output queue has a reader ready
 
-            # Start transcriber first so it's ready for audio
+            # Start output handler first (ready to receive transcribed text)
+            await self.output_handler.start(self.transcriber.output_queue)
+
+            # Set transcriber output mode and start it
+            self.transcriber.set_current_output_mode(output_mode)
             if not await self.transcriber.start():
+                await self.output_handler.stop()
                 logger.error("Failed to start transcriber")
                 return False
 
-            # Start audio capture
+            # Start audio capture last (will start producing data)
             try:
                 await self.audio_capture.start()
             except Exception as e:
-                # Clean up transcriber if capture fails
+                # Clean up transcriber and output if capture fails
                 await self.transcriber.stop()
+                await self.output_handler.stop()
                 logger.error(f"Failed to start audio capture: {e}")
                 return False
 
@@ -119,12 +125,13 @@ class IPCServer:
             return False
 
     async def _stop_processing(self) -> None:
-        """Stop audio capture and transcription."""
+        """Stop audio capture, transcription, and output handling."""
         logger.info("Stopping audio processing")
 
         # Stop in reverse order of starting
         await self.audio_capture.stop()
         await self.transcriber.stop()
+        await self.output_handler.stop()
 
         # Return to IDLE state
         if self.state_manager.current_state != DaemonStateEnum.ERROR:
