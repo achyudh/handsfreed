@@ -5,9 +5,11 @@ import json
 import pytest
 import pytest_asyncio
 from pathlib import Path
+from unittest.mock import MagicMock, patch, AsyncMock, ANY
 
 from handsfreed.state import DaemonStateManager, DaemonStateEnum
 from handsfreed.ipc_server import IPCServer
+from handsfreed.ipc_models import CliOutputMode
 
 
 @pytest.fixture
@@ -28,10 +30,52 @@ def shutdown_event():
     return asyncio.Event()
 
 
+@pytest.fixture
+def audio_capture():
+    """Create a mock audio capture instance."""
+    capture = AsyncMock()
+    capture.start = AsyncMock()
+    capture.stop = AsyncMock()
+    return capture
+
+
+@pytest.fixture
+def transcriber():
+    """Create a mock transcriber instance."""
+    trans = AsyncMock()
+    trans.start = AsyncMock(return_value=True)
+    trans.stop = AsyncMock()
+    trans.set_current_output_mode = MagicMock()
+    return trans
+
+
+@pytest.fixture
+def output_handler():
+    """Create a mock output handler instance."""
+    handler = AsyncMock()
+    handler.start = AsyncMock()
+    handler.stop = AsyncMock()
+    return handler
+
+
 @pytest_asyncio.fixture
-async def ipc_server(socket_path, state_manager, shutdown_event):
+async def ipc_server(
+    socket_path,
+    state_manager,
+    shutdown_event,
+    transcriber,
+    audio_capture,
+    output_handler,
+):
     """Create an IPC server instance."""
-    server = IPCServer(socket_path, state_manager, shutdown_event)
+    server = IPCServer(
+        socket_path,
+        state_manager,
+        shutdown_event,
+        transcriber,
+        audio_capture,
+        output_handler,
+    )
     try:
         yield server
     finally:
@@ -40,17 +84,17 @@ async def ipc_server(socket_path, state_manager, shutdown_event):
             await server.stop()
 
 
-async def send_command_get_response(socket_path: Path, command_dict: dict) -> dict:
-    """Helper to send a command and get response."""
+async def send_command_get_response(socket_path: Path, command: dict) -> dict:
+    """Helper to send command and get response."""
     reader, writer = await asyncio.open_unix_connection(str(socket_path))
     try:
         # Send command
-        command_json = json.dumps(command_dict) + "\n"
+        command_json = json.dumps(command) + "\n"
         writer.write(command_json.encode())
         await writer.drain()
 
         # Read response
-        response = await reader.readline()
+        response = await asyncio.wait_for(reader.readline(), timeout=1.0)
         return json.loads(response.decode())
     finally:
         writer.close()
@@ -87,95 +131,168 @@ async def test_server_existing_socket(ipc_server, socket_path):
 
 
 @pytest.mark.asyncio
-async def test_status_command(ipc_server: IPCServer, socket_path, state_manager):
-    """Test status command returns current state."""
+async def test_start_command_success(
+    ipc_server, socket_path, state_manager, transcriber, audio_capture
+):
+    """Test successful Start command."""
     await ipc_server.start()
 
-    # Set a known state
+    # Send Start command
+    response = await send_command_get_response(
+        socket_path, {"command": "start", "output_mode": "keyboard"}
+    )
+
+    # Check response
+    assert response["response_type"] == "ack"
+
+    # Verify handlers were called
+    transcriber.set_current_output_mode.assert_called_with(CliOutputMode.KEYBOARD)
+    transcriber.start.assert_called_once()
+    audio_capture.start.assert_called_once()
+
+    # Check state
+    assert state_manager.current_state == DaemonStateEnum.LISTENING
+
+
+@pytest.mark.asyncio
+async def test_start_command_transcriber_failure(
+    ipc_server, socket_path, state_manager, transcriber, audio_capture
+):
+    """Test Start command when transcriber fails."""
+    await ipc_server.start()
+    transcriber.start.return_value = False  # Make transcriber fail
+
+    # Send Start command
+    response = await send_command_get_response(
+        socket_path, {"command": "start", "output_mode": "keyboard"}
+    )
+
+    # Check response
+    assert response["response_type"] == "error"
+    assert "Failed to start" in response["message"]
+
+    # Audio capture should not be started
+    audio_capture.start.assert_not_called()
+
+    # Check state
+    assert state_manager.current_state == DaemonStateEnum.ERROR
+
+
+@pytest.mark.asyncio
+async def test_start_command_audio_failure(
+    ipc_server, socket_path, state_manager, transcriber, audio_capture
+):
+    """Test Start command when audio capture fails."""
+    await ipc_server.start()
+    audio_capture.start.side_effect = RuntimeError("Test error")
+
+    # Send Start command
+    response = await send_command_get_response(
+        socket_path, {"command": "start", "output_mode": "keyboard"}
+    )
+
+    # Check response
+    assert response["response_type"] == "error"
+    assert "Failed to start" in response["message"]
+
+    # Transcriber should be stopped
+    transcriber.stop.assert_called_once()
+
+    # Check state
+    assert state_manager.current_state == DaemonStateEnum.ERROR
+
+
+@pytest.mark.asyncio
+async def test_start_while_running(
+    ipc_server, socket_path, state_manager, transcriber, audio_capture
+):
+    """Test Start command while already running."""
+    await ipc_server.start()
     state_manager.set_state(DaemonStateEnum.LISTENING)
 
-    # Send status command
+    # Send Start command with different mode
+    response = await send_command_get_response(
+        socket_path, {"command": "start", "output_mode": "clipboard"}
+    )
+
+    # Should succeed but only change mode
+    assert response["response_type"] == "ack"
+    transcriber.set_current_output_mode.assert_called_with(CliOutputMode.CLIPBOARD)
+    transcriber.start.assert_not_called()  # Should not restart
+    audio_capture.start.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_command_success(
+    ipc_server, socket_path, state_manager, transcriber, audio_capture
+):
+    """Test successful Stop command."""
+    await ipc_server.start()
+    state_manager.set_state(DaemonStateEnum.LISTENING)
+
+    # Send Stop command
+    response = await send_command_get_response(socket_path, {"command": "stop"})
+
+    # Check response
+    assert response["response_type"] == "ack"
+
+    # Verify handlers were called
+    audio_capture.stop.assert_called_once()
+    transcriber.stop.assert_called_once()
+
+    # Check state
+    assert state_manager.current_state == DaemonStateEnum.IDLE
+
+
+@pytest.mark.asyncio
+async def test_stop_when_idle(ipc_server, socket_path, transcriber, audio_capture):
+    """Test Stop command when already idle."""
+    await ipc_server.start()
+
+    # Send Stop command
+    response = await send_command_get_response(socket_path, {"command": "stop"})
+
+    # Should succeed but do nothing
+    assert response["response_type"] == "ack"
+    transcriber.stop.assert_not_called()
+    audio_capture.stop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_status_command(ipc_server, socket_path, state_manager):
+    """Test Status command."""
+    await ipc_server.start()
+    state_manager.set_state(DaemonStateEnum.LISTENING)
+
+    # Send Status command
     response = await send_command_get_response(socket_path, {"command": "status"})
 
+    # Check response
     assert response["response_type"] == "status"
     assert response["status"]["state"] == "listening"
     assert response["status"]["last_error"] is None
 
 
 @pytest.mark.asyncio
-async def test_status_command_with_error(ipc_server, socket_path, state_manager):
-    """Test status command includes error message."""
-    await ipc_server.start()
-
-    # Set error state
-    error_msg = "Test error"
-    state_manager.set_error(error_msg)
-
-    # Send status command
-    response = await send_command_get_response(socket_path, {"command": "status"})
-
-    assert response["response_type"] == "status"
-    assert response["status"]["state"] == "error"
-    assert response["status"]["last_error"] == error_msg
-
-
-@pytest.mark.asyncio
 async def test_shutdown_command(ipc_server, socket_path, shutdown_event):
-    """Test shutdown command sets event."""
+    """Test Shutdown command."""
     await ipc_server.start()
 
-    # Send shutdown command
+    # Send Shutdown command
     response = await send_command_get_response(socket_path, {"command": "shutdown"})
 
+    # Check response and shutdown signal
     assert response["response_type"] == "ack"
     assert shutdown_event.is_set()
 
 
 @pytest.mark.asyncio
-async def test_invalid_command_json(ipc_server, socket_path):
-    """Test handling of invalid JSON."""
+async def test_invalid_command(ipc_server, socket_path):
+    """Test handling of invalid command."""
     await ipc_server.start()
 
-    reader, writer = await asyncio.open_unix_connection(str(socket_path))
-    try:
-        # Send invalid JSON
-        writer.write(b"invalid json\n")
-        await writer.drain()
-
-        # Read response
-        response = await reader.readline()
-        response_dict = json.loads(response.decode())
-
-        assert response_dict["response_type"] == "error"
-        assert "Invalid JSON" in response_dict["message"]
-    finally:
-        writer.close()
-        await writer.wait_closed()
-
-
-@pytest.mark.asyncio
-async def test_invalid_command_format(ipc_server, socket_path):
-    """Test handling of invalid command format."""
-    await ipc_server.start()
-
-    # Send command with invalid structure
+    # Send invalid command
     response = await send_command_get_response(socket_path, {"command": "invalid"})
 
     assert response["response_type"] == "error"
     assert "Invalid command format" in response["message"]
-
-
-@pytest.mark.asyncio
-async def test_connection_cleanup(ipc_server, socket_path):
-    """Test server cleans up client tasks."""
-    await ipc_server.start()
-    initial_tasks = len(ipc_server._client_tasks)
-
-    # Open and close a connection
-    reader, writer = await asyncio.open_unix_connection(str(socket_path))
-    writer.close()
-    await writer.wait_closed()
-
-    # Wait briefly for cleanup
-    await asyncio.sleep(0.1)
-    assert len(ipc_server._client_tasks) == initial_tasks

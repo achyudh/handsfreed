@@ -8,16 +8,21 @@ from typing import Optional, Set
 
 from pydantic import ValidationError
 
-from .state import DaemonStateManager
+from .state import DaemonStateManager, DaemonStateEnum
+from .transcriber import Transcriber
+from .audio_capture import AudioCapture
+from .output_handler import OutputHandler
 from .ipc_models import (
     CommandWrapper,
+    StartCommand,
+    StopCommand,
     StatusCommand,
     ShutdownCommand,
-    DaemonStateModel,
     ResponseWrapper,
     AckResponse,
     StatusResponse,
     ErrorResponse,
+    DaemonStateModel,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,17 +40,27 @@ class IPCServer:
         socket_path: Path,
         state_manager: DaemonStateManager,
         shutdown_event: asyncio.Event,
+        transcriber: Transcriber,
+        audio_capture: AudioCapture,
+        output_handler: OutputHandler,
     ):
         """Initialize the IPC server.
 
         Args:
-            socket_path: Path to the Unix domain socket.
-            state_manager: The daemon state manager instance.
-            shutdown_event: Event to signal daemon shutdown.
+            socket_path: Path to the Unix domain socket
+            state_manager: Daemon state manager instance
+            shutdown_event: Event to signal daemon shutdown
+            transcriber: Transcription handler instance
+            audio_capture: Audio capture handler instance
+            output_handler: Output handler instance
         """
         self.socket_path = socket_path
         self.state_manager = state_manager
         self.shutdown_event = shutdown_event
+        self.transcriber = transcriber
+        self.audio_capture = audio_capture
+        self.output_handler = output_handler
+
         self._server: Optional[asyncio.Server] = None
         self._client_tasks: Set[asyncio.Task] = set()
 
@@ -55,8 +70,8 @@ class IPCServer:
         """Send a response to a client.
 
         Args:
-            writer: The StreamWriter to send the response through.
-            response: The wrapped response to send.
+            writer: StreamWriter to send through
+            response: Response to send
         """
         try:
             response_json = response.model_dump_json()
@@ -66,11 +81,120 @@ class IPCServer:
         except Exception as e:
             logger.error(f"Error sending response: {e}")
 
-    async def _handle_status_command(self, writer: asyncio.StreamWriter) -> None:
-        """Handle a Status command.
+    async def _start_processing(self, output_mode) -> bool:
+        """Start audio capture, transcription, and output processing.
 
         Args:
-            writer: The StreamWriter to send the response through.
+            output_mode: Output mode to use (keyboard/clipboard)
+
+        Returns:
+            True if started successfully, False otherwise
+        """
+        try:
+            # Set transcriber output mode before starting capture
+            self.transcriber.set_current_output_mode(output_mode)
+
+            # Start transcriber first so it's ready for audio
+            if not await self.transcriber.start():
+                logger.error("Failed to start transcriber")
+                return False
+
+            # Start audio capture
+            try:
+                await self.audio_capture.start()
+            except Exception as e:
+                # Clean up transcriber if capture fails
+                await self.transcriber.stop()
+                logger.error(f"Failed to start audio capture: {e}")
+                return False
+
+            # Set state to LISTENING
+            self.state_manager.set_state(DaemonStateEnum.LISTENING)
+            return True
+
+        except Exception as e:
+            logger.exception(f"Error starting processing: {e}")
+            # Try to clean up if something unexpected failed
+            await self._stop_processing()
+            return False
+
+    async def _stop_processing(self) -> None:
+        """Stop audio capture and transcription."""
+        logger.info("Stopping audio processing")
+
+        # Stop in reverse order of starting
+        await self.audio_capture.stop()
+        await self.transcriber.stop()
+
+        # Return to IDLE state
+        if self.state_manager.current_state != DaemonStateEnum.ERROR:
+            self.state_manager.set_state(DaemonStateEnum.IDLE)
+
+    async def _handle_start_command(
+        self, writer: asyncio.StreamWriter, command: StartCommand
+    ) -> None:
+        """Handle Start command.
+
+        Args:
+            writer: StreamWriter to send response through
+            command: Start command with output mode
+        """
+        logger.info(f"Handling Start command (Output: {command.output_mode.value})")
+
+        # Check if already processing
+        if self.state_manager.current_state in (
+            DaemonStateEnum.LISTENING,
+            DaemonStateEnum.PROCESSING,
+        ):
+            # Just change output mode and acknowledge
+            logger.info("Already processing, changing output mode")
+            self.transcriber.set_current_output_mode(command.output_mode)
+            await self._send_response(writer, ResponseWrapper(root=AckResponse()))
+            return
+
+        # Start processing
+        success = await self._start_processing(command.output_mode)
+        if not success:
+            error_msg = "Failed to start audio processing"
+            self.state_manager.set_error(error_msg)
+            await self._send_response(
+                writer, ResponseWrapper(root=ErrorResponse(message=error_msg))
+            )
+            return
+
+        await self._send_response(writer, ResponseWrapper(root=AckResponse()))
+
+    async def _handle_stop_command(self, writer: asyncio.StreamWriter) -> None:
+        """Handle Stop command.
+
+        Args:
+            writer: StreamWriter to send response through
+        """
+        logger.info("Handling Stop command")
+
+        # Check if actually processing
+        if self.state_manager.current_state == DaemonStateEnum.IDLE:
+            logger.info("Already stopped")
+            await self._send_response(writer, ResponseWrapper(root=AckResponse()))
+            return
+
+        # Stop processing
+        try:
+            await self._stop_processing()
+            await self._send_response(writer, ResponseWrapper(root=AckResponse()))
+        except Exception as e:
+            error_msg = f"Error stopping audio processing: {e}"
+            logger.exception(error_msg)
+            self.state_manager.set_error(error_msg)
+            await self._send_response(
+                writer, ResponseWrapper(root=ErrorResponse(message=error_msg))
+            )
+
+    async def _handle_status_command(self, writer: asyncio.StreamWriter) -> None:
+        """Handle Status command.
+
+        Args:
+            writer: StreamWriter to send response through
         """
         logger.debug("Handling Status command")
         state, error = self.state_manager.get_status()
@@ -79,42 +203,58 @@ class IPCServer:
         await self._send_response(writer, response)
 
     async def _handle_shutdown_command(self, writer: asyncio.StreamWriter) -> None:
-        """Handle a Shutdown command.
+        """Handle Shutdown command.
 
         Args:
-            writer: The StreamWriter to send the response through.
+            writer: StreamWriter to send response through
         """
-        logger.info("Received shutdown command")
-        # Set shutdown event first
-        self.shutdown_event.set()
-        # Then send response
+        logger.info("Handling Shutdown command")
+
+        # Stop any active processing first
+        if self.state_manager.current_state != DaemonStateEnum.IDLE:
+            await self._stop_processing()
+
+        # Send acknowledgment
         await self._send_response(writer, ResponseWrapper(root=AckResponse()))
-        await writer.drain()
+        await writer.drain()  # Ensure it's sent
+
+        # Signal shutdown
+        self.shutdown_event.set()
 
     async def _handle_command(self, writer: asyncio.StreamWriter, message: str) -> bool:
         """Parse and handle a command message.
 
         Args:
-            writer: The StreamWriter to send responses through.
-            message: The command message to parse and handle.
+            writer: StreamWriter to send responses through
+            message: Command message to parse and handle
 
         Returns:
-            True if the connection should be kept alive, False to close it.
+            True if connection should be kept alive, False to close it
         """
         try:
             command = CommandWrapper.model_validate_json(message)
             logger.debug(f"Parsed command: {command.model_dump_json()}")
 
-            if isinstance(command.root, StatusCommand):
+            if isinstance(command.root, StartCommand):
+                await self._handle_start_command(writer, command.root)
+                return True
+            elif isinstance(command.root, StopCommand):
+                await self._handle_stop_command(writer)
+                return True
+            elif isinstance(command.root, StatusCommand):
                 await self._handle_status_command(writer)
                 return True
             elif isinstance(command.root, ShutdownCommand):
                 await self._handle_shutdown_command(writer)
                 return False
             else:
-                # Start/Stop commands will be handled in next prompt
-                logger.warning(f"Command type not yet implemented: {command.root}")
-                await self._send_response(writer, ResponseWrapper(root=AckResponse()))
+                logger.error(f"Unhandled command type: {type(command.root)}")
+                await self._send_response(
+                    writer,
+                    ResponseWrapper(
+                        root=ErrorResponse(message="Internal server error")
+                    ),
+                )
                 return True
 
         except ValidationError as e:
@@ -126,8 +266,9 @@ class IPCServer:
                 ),
             )
             return True
+
         except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in command: {e}")
+            logger.error(f"Invalid JSON: {e}")
             await self._send_response(
                 writer,
                 ResponseWrapper(
@@ -135,6 +276,7 @@ class IPCServer:
                 ),
             )
             return True
+
         except Exception as e:
             logger.exception("Error handling command")
             await self._send_response(
@@ -149,8 +291,8 @@ class IPCServer:
         """Handle a client connection.
 
         Args:
-            reader: StreamReader for the client connection
-            writer: StreamWriter for the client connection
+            reader: StreamReader for the client
+            writer: StreamWriter for the client
         """
         peer = writer.get_extra_info("peername") or "Unknown"
         logger.info(f"Client connected: {peer}")
@@ -208,11 +350,7 @@ class IPCServer:
             logger.debug(f"Connection closed: {peer}")
 
     async def start(self) -> None:
-        """Start the IPC server.
-
-        Raises:
-            OSError: If socket file exists and can't be removed, or other IO errors.
-        """
+        """Start the IPC server."""
         if self._server:
             logger.warning("Server already started")
             return
@@ -249,12 +387,16 @@ class IPCServer:
             raise
 
     async def stop(self) -> None:
-        """Stop the IPC server and clean up."""
+        """Stop the IPC server."""
         if not self._server:
             logger.warning("Server not running")
             return
 
         logger.info("Stopping IPC server...")
+
+        # Stop any active processing
+        if self.state_manager.current_state != DaemonStateEnum.IDLE:
+            await self._stop_processing()
 
         # Close the server
         self._server.close()
