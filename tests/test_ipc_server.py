@@ -1,12 +1,12 @@
 """Tests for IPC server."""
 
 import asyncio
+import json
 import pytest
 import pytest_asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
 
-from handsfreed.state import DaemonStateManager
+from handsfreed.state import DaemonStateManager, DaemonStateEnum
 from handsfreed.ipc_server import IPCServer
 
 
@@ -22,10 +22,16 @@ def socket_path(tmp_path):
     return tmp_path / "test.sock"
 
 
+@pytest.fixture
+def shutdown_event():
+    """Create a shutdown event."""
+    return asyncio.Event()
+
+
 @pytest_asyncio.fixture
-async def ipc_server(socket_path, state_manager):
+async def ipc_server(socket_path, state_manager, shutdown_event):
     """Create an IPC server instance."""
-    server = IPCServer(socket_path, state_manager)
+    server = IPCServer(socket_path, state_manager, shutdown_event)
     try:
         yield server
     finally:
@@ -34,8 +40,25 @@ async def ipc_server(socket_path, state_manager):
             await server.stop()
 
 
+async def send_command_get_response(socket_path: Path, command_dict: dict) -> dict:
+    """Helper to send a command and get response."""
+    reader, writer = await asyncio.open_unix_connection(str(socket_path))
+    try:
+        # Send command
+        command_json = json.dumps(command_dict) + "\n"
+        writer.write(command_json.encode())
+        await writer.drain()
+
+        # Read response
+        response = await reader.readline()
+        return json.loads(response.decode())
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
 @pytest.mark.asyncio
-async def test_server_start(ipc_server: IPCServer, socket_path):
+async def test_server_start(ipc_server, socket_path):
     """Test starting the server."""
     await ipc_server.start()
     assert ipc_server._server is not None
@@ -44,7 +67,7 @@ async def test_server_start(ipc_server: IPCServer, socket_path):
 
 
 @pytest.mark.asyncio
-async def test_server_stop(ipc_server: IPCServer, socket_path):
+async def test_server_stop(ipc_server, socket_path):
     """Test stopping the server."""
     await ipc_server.start()
     assert ipc_server._server is not None
@@ -55,85 +78,104 @@ async def test_server_stop(ipc_server: IPCServer, socket_path):
 
 
 @pytest.mark.asyncio
-async def test_server_existing_socket(ipc_server: IPCServer, socket_path):
+async def test_server_existing_socket(ipc_server, socket_path):
     """Test handling of existing socket file."""
-    # Create a file at the socket path
     socket_path.touch()
 
-    # Should fail if path exists but isn't a socket
     with pytest.raises(OSError, match="not a socket"):
         await ipc_server.start()
 
 
 @pytest.mark.asyncio
-async def test_server_client_echo(ipc_server: IPCServer, socket_path):
-    """Test basic client communication (echo)."""
+async def test_status_command(ipc_server: IPCServer, socket_path, state_manager):
+    """Test status command returns current state."""
     await ipc_server.start()
 
-    # Connect a test client
-    reader, writer = await asyncio.open_unix_connection(str(socket_path))
+    # Set a known state
+    state_manager.set_state(DaemonStateEnum.LISTENING)
 
+    # Send status command
+    response = await send_command_get_response(socket_path, {"command": "status"})
+
+    assert response["response_type"] == "status"
+    assert response["status"]["state"] == "listening"
+    assert response["status"]["last_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_status_command_with_error(ipc_server, socket_path, state_manager):
+    """Test status command includes error message."""
+    await ipc_server.start()
+
+    # Set error state
+    error_msg = "Test error"
+    state_manager.set_error(error_msg)
+
+    # Send status command
+    response = await send_command_get_response(socket_path, {"command": "status"})
+
+    assert response["response_type"] == "status"
+    assert response["status"]["state"] == "error"
+    assert response["status"]["last_error"] == error_msg
+
+
+@pytest.mark.asyncio
+async def test_shutdown_command(ipc_server, socket_path, shutdown_event):
+    """Test shutdown command sets event."""
+    await ipc_server.start()
+
+    # Send shutdown command
+    response = await send_command_get_response(socket_path, {"command": "shutdown"})
+
+    assert response["response_type"] == "ack"
+    assert shutdown_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_invalid_command_json(ipc_server, socket_path):
+    """Test handling of invalid JSON."""
+    await ipc_server.start()
+
+    reader, writer = await asyncio.open_unix_connection(str(socket_path))
     try:
-        # Send test message
-        test_msg = "Hello, server!\n"
-        writer.write(test_msg.encode())
+        # Send invalid JSON
+        writer.write(b"invalid json\n")
         await writer.drain()
 
         # Read response
-        response = await asyncio.wait_for(reader.readline(), timeout=1.0)
-        assert response.decode().strip() == f"Echo: {test_msg.strip()}"
+        response = await reader.readline()
+        response_dict = json.loads(response.decode())
 
+        assert response_dict["response_type"] == "error"
+        assert "Invalid JSON" in response_dict["message"]
     finally:
         writer.close()
         await writer.wait_closed()
 
 
 @pytest.mark.asyncio
-async def test_server_multiple_clients(ipc_server: IPCServer, socket_path):
-    """Test handling multiple client connections."""
+async def test_invalid_command_format(ipc_server, socket_path):
+    """Test handling of invalid command format."""
     await ipc_server.start()
 
-    # Connect two test clients
-    reader1, writer1 = await asyncio.open_unix_connection(str(socket_path))
-    reader2, writer2 = await asyncio.open_unix_connection(str(socket_path))
+    # Send command with invalid structure
+    response = await send_command_get_response(socket_path, {"command": "invalid"})
 
-    try:
-        # Send messages from both clients
-        msg1 = "Client 1\n"
-        msg2 = "Client 2\n"
-
-        writer1.write(msg1.encode())
-        writer2.write(msg2.encode())
-        await writer1.drain()
-        await writer2.drain()
-
-        # Read responses
-        response1 = await asyncio.wait_for(reader1.readline(), timeout=1.0)
-        response2 = await asyncio.wait_for(reader2.readline(), timeout=1.0)
-
-        assert response1.decode().strip() == f"Echo: {msg1.strip()}"
-        assert response2.decode().strip() == f"Echo: {msg2.strip()}"
-
-    finally:
-        writer1.close()
-        writer2.close()
-        await writer1.wait_closed()
-        await writer2.wait_closed()
+    assert response["response_type"] == "error"
+    assert "Invalid command format" in response["message"]
 
 
 @pytest.mark.asyncio
-async def test_server_client_disconnect(ipc_server: IPCServer, socket_path):
-    """Test handling client disconnection."""
+async def test_connection_cleanup(ipc_server, socket_path):
+    """Test server cleans up client tasks."""
     await ipc_server.start()
     initial_tasks = len(ipc_server._client_tasks)
 
-    # Connect and immediately disconnect
+    # Open and close a connection
     reader, writer = await asyncio.open_unix_connection(str(socket_path))
     writer.close()
     await writer.wait_closed()
 
-    # Give the server time to clean up
+    # Wait briefly for cleanup
     await asyncio.sleep(0.1)
-
-    # Should be back to initial task count
     assert len(ipc_server._client_tasks) == initial_tasks

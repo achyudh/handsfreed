@@ -31,13 +31,16 @@ async def main() -> int:
     setup_logging(config.daemon.log_level, config.daemon.computed_log_file)
     logger.info("Starting handsfreed daemon...")
 
-    # Create state manager and IPC server
+    # Create state manager and shutdown event
     state_manager = DaemonStateManager()
-    ipc_server = IPCServer(config.daemon.computed_socket_path, state_manager)
-
-    # Setup shutdown handler
     shutdown_event = asyncio.Event()
 
+    # Create IPC server with both state manager and shutdown event
+    ipc_server = IPCServer(
+        config.daemon.computed_socket_path, state_manager, shutdown_event
+    )
+
+    # Setup signal handlers
     def handle_signal(sig: int) -> None:
         sig_name = signal.Signals(sig).name
         logger.info(f"Received signal {sig_name}, initiating shutdown...")
