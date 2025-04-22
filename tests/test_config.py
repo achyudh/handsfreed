@@ -1,0 +1,193 @@
+import pytest
+from pathlib import Path
+import os
+from unittest.mock import patch
+
+from handsfreed.config import (
+    load_config,
+    AppConfig,
+    get_default_config_path,
+    get_default_socket_path,
+    get_default_log_path,
+)
+
+VALID_CONFIG = {
+    "whisper": {
+        "model": "base",
+        "device": "cpu",
+        "compute_type": "float32",
+        "language": "en",
+        "beam_size": 3,
+        "vad_filter": True,
+    },
+    "vad": {
+        "threshold": 0.6,
+        "min_speech_duration_ms": 300,
+        "min_silence_duration_ms": 2000,
+    },
+    "output": {
+        "keyboard_command": "xdotool type --delay 0",
+        "clipboard_command": "wl-copy",
+    },
+    "daemon": {
+        "log_level": "DEBUG",
+        "log_file": "/custom/log/path.log",
+        "socket_path": "/custom/socket/path.sock",
+    },
+}
+
+
+@pytest.fixture
+def mock_config_file(tmp_path):
+    """Creates a mock config file with valid TOML content."""
+    config_file = tmp_path / "config.toml"
+    config_content = """
+        [whisper]
+        model = "base"
+        device = "cpu"
+        compute_type = "float32"
+        language = "en"
+        beam_size = 3
+        vad_filter = true
+
+        [vad]
+        threshold = 0.6
+        min_speech_duration_ms = 300
+        min_silence_duration_ms = 2000
+
+        [output]
+        keyboard_command = "xdotool type --delay 0"
+        clipboard_command = "wl-copy"
+
+        [daemon]
+        log_level = "DEBUG"
+        log_file = "/custom/log/path.log"
+        socket_path = "/custom/socket/path.sock"
+        """
+    config_file.write_text(config_content)
+    return config_file
+
+
+def test_load_config_success(mock_config_file):
+    """Test loading a valid configuration file."""
+    config = load_config(mock_config_file)
+    assert isinstance(config, AppConfig)
+    assert config.whisper.model == "base"
+    assert config.whisper.device == "cpu"
+    assert config.vad.threshold == 0.6
+    assert config.output.keyboard_command == "xdotool type --delay 0"
+    assert config.daemon.log_level == "DEBUG"
+
+
+def test_load_config_file_not_found():
+    """Test handling of non-existent config file."""
+    with pytest.raises(FileNotFoundError):
+        load_config(Path("/nonexistent/config.toml"))
+
+
+def test_load_config_invalid_toml(tmp_path):
+    """Test handling of invalid TOML syntax."""
+    invalid_file = tmp_path / "invalid.toml"
+    invalid_file.write_text("invalid { toml = syntax")
+    with pytest.raises(ValueError, match="Error decoding TOML file"):
+        load_config(invalid_file)
+
+
+def test_load_config_missing_required():
+    """Test validation of missing required fields."""
+    config_data = {
+        "whisper": {"model": "base"},  # Missing output section
+    }
+    with pytest.raises(ValueError, match="Field required"):
+        AppConfig(**config_data)
+
+
+def test_vad_config_validation():
+    """Test VAD configuration validation."""
+    with pytest.raises(ValueError, match="must be positive"):
+        AppConfig(
+            **{**VALID_CONFIG, "vad": {"threshold": 0.5, "min_speech_duration_ms": -1}}
+        )
+
+
+def test_whisper_config_validation():
+    """Test Whisper configuration validation."""
+    with pytest.raises(ValueError, match="must be positive"):
+        AppConfig(
+            **{**VALID_CONFIG, "whisper": {**VALID_CONFIG["whisper"], "beam_size": 0}}
+        )
+
+
+def test_output_config_validation():
+    """Test output configuration validation."""
+    with pytest.raises(ValueError, match="must not be empty"):
+        AppConfig(
+            **{
+                **VALID_CONFIG,
+                "output": {"keyboard_command": "", "clipboard_command": "wl-copy"},
+            }
+        )
+
+
+def test_daemon_config_validation():
+    """Test daemon configuration validation."""
+    with pytest.raises(ValueError, match="Invalid log level"):
+        AppConfig(
+            **{
+                **VALID_CONFIG,
+                "daemon": {**VALID_CONFIG["daemon"], "log_level": "INVALID"},
+            }
+        )
+
+
+def test_default_config_path():
+    """Test default config path construction."""
+    expected = Path.home() / ".config" / "handsfree" / "config.toml"
+    assert get_default_config_path() == expected
+
+
+@pytest.mark.parametrize(
+    "xdg_set,expected_base",
+    [
+        (True, "XDG_RUNTIME_DIR_VALUE/handsfree/daemon.sock"),
+        (False, "/tmp/handsfree-testuser.sock"),
+    ],
+)
+def test_default_socket_path(xdg_set, expected_base):
+    """Test socket path defaults with and without XDG_RUNTIME_DIR."""
+    with (
+        patch.dict(
+            os.environ,
+            {"XDG_RUNTIME_DIR": "XDG_RUNTIME_DIR_VALUE"} if xdg_set else {},
+            clear=True,
+        ),
+        patch("pathlib.Path.mkdir"),
+        patch("os.access", return_value=True),
+        patch("getpass.getuser", return_value="testuser"),
+    ):
+        path = get_default_socket_path()
+        assert str(path) == expected_base
+
+
+def test_default_log_path():
+    """Test default log path construction."""
+    with patch("pathlib.Path.mkdir"):
+        expected = Path.home() / ".local" / "state" / "handsfree" / "handsfreed.log"
+        assert get_default_log_path() == expected
+
+
+def test_computed_paths():
+    """Test computed path properties."""
+    config = AppConfig(**VALID_CONFIG)
+    assert config.daemon.computed_log_file == Path(VALID_CONFIG["daemon"]["log_file"])
+    assert config.daemon.computed_socket_path == Path(
+        VALID_CONFIG["daemon"]["socket_path"]
+    )
+
+    # Test defaults when not specified
+    minimal_config = AppConfig(
+        whisper={"model": "base"},
+        output={"keyboard_command": "test", "clipboard_command": "test"},
+    )
+    assert minimal_config.daemon.computed_log_file == get_default_log_path()
+    assert minimal_config.daemon.computed_socket_path == get_default_socket_path()
