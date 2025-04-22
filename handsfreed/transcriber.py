@@ -7,6 +7,7 @@ import numpy as np
 from faster_whisper import WhisperModel
 
 from .config import AppConfig
+from .ipc_models import CliOutputMode
 
 logger = logging.getLogger(__name__)
 
@@ -17,11 +18,13 @@ class TranscriptionResult:
     def __init__(
         self,
         text: str,
+        output_mode: CliOutputMode,
         language: Optional[str] = None,
         language_probability: Optional[float] = None,
         duration: Optional[float] = None,
     ):
         self.text = text
+        self.output_mode = output_mode
         self.language = language
         self.language_probability = language_probability
         self.duration = duration
@@ -55,6 +58,13 @@ class Transcriber:
         self._model: Optional[WhisperModel] = None
         self._transcription_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
+        self._current_output_mode: Optional[CliOutputMode] = None
+
+    def set_current_output_mode(self, mode: Optional[CliOutputMode]) -> None:
+        """Set the output mode for subsequent transcriptions."""
+        if mode != self._current_output_mode:
+            logger.info(f"Setting output mode to: {mode.value if mode else 'None'}")
+            self._current_output_mode = mode
 
     def load_model(self) -> bool:
         """Load the Whisper model.
@@ -124,9 +134,14 @@ class Transcriber:
             if not full_text:
                 return None, None  # Empty result
 
+            # Must have output mode set to produce result
+            if self._current_output_mode is None:
+                return None, "No output mode set"
+
             # Return result with metadata
             return TranscriptionResult(
                 text=full_text,
+                output_mode=self._current_output_mode,
                 language=info.language,
                 language_probability=info.language_probability,
                 duration=info.duration,
@@ -166,16 +181,16 @@ class Transcriber:
 
                     if result and result.text:
                         logger.info(
-                            f"Transcribed [{result.language or 'unknown'}]: "
-                            f"{result.text[:100]}..."
+                            f"Transcribed [{result.language or 'unknown'}] "
+                            f"for {result.output_mode.value}: {result.text[:100]}..."
                         )
                         if result.language_probability is not None:
                             logger.debug(
                                 f"Language probability: {result.language_probability:.2f}"
                             )
 
-                        # Put result on output queue
-                        await self.output_queue.put(result)
+                        # Put transcription and output mode on output queue
+                        await self.output_queue.put((result.text, result.output_mode))
                     else:
                         logger.debug("No transcription result")
 
@@ -235,3 +250,5 @@ class Transcriber:
             logger.exception(f"Error stopping transcription loop: {e}")
         finally:
             self._transcription_task = None
+            # Clear output mode on stop
+            self._current_output_mode = None
