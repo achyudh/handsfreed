@@ -5,7 +5,7 @@ import collections
 import enum
 import logging
 import time
-from typing import Deque, List, Optional
+from typing import Deque, List
 
 import numpy as np
 

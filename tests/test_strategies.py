@@ -1,7 +1,6 @@
 """Tests for audio segmentation strategies."""
 
 import asyncio
-from typing import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import numpy as np
