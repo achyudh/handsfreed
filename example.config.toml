@@ -11,33 +11,45 @@ device = "auto"
 compute_type = "auto"
 
 # Optional language code (leave empty for auto-detect)
-language = "en"
+language = ""
 
 # Beam size for search (1-10, higher is slower but more accurate)
 beam_size = 5
 
-# Enable voice activity detection filtering (experimental)
-vad_filter = false
+# Number of CPU threads for inference (0 = auto)
+cpu_threads = 0
 
 [vad]
+# Enable Voice Activity Detection
+enabled = false
+
 # Threshold for voice detection (0.0-1.0)
 threshold = 0.5
 
 # Minimum duration for a speech segment (ms)
-min_speech_duration_ms = 250
+min_speech_duration_ms = 256
 
 # Minimum duration for a silence segment (ms)
-min_silence_duration_ms = 1500
+min_silence_duration_ms = 1024
+
+# Pre-roll duration in milliseconds (captures audio before speech starts)
+pre_roll_duration_ms = 192
+
+# Optional negative threshold (must be between 0.0 and 1.0)
+# neg_threshold = 0.1
+
+# Maximum speech duration in seconds (0 = unlimited)
+max_speech_duration_s = 0.0
 
 [output]
 # Command to execute for keyboard output
-keyboard_command = "xdotool type --delay 0"
+keyboard_command = "wtype -"
 
 # Command to execute for clipboard output
 clipboard_command = "wl-copy"
 
 [daemon]
-# Log level (DEBUG, INFO, WARNING, ERROR)
+# Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
 log_level = "INFO"
 
 # Optional custom log file path
@@ -47,3 +59,6 @@ log_level = "INFO"
 # Optional custom socket path
 # Default: $XDG_RUNTIME_DIR/handsfree/daemon.sock or /tmp/handsfree-$USER.sock
 # socket_path = "/var/run/handsfree/daemon.sock"
+
+# Time chunk size in seconds for audio processing
+time_chunk_s = 5.0

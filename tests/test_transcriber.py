@@ -87,9 +87,17 @@ async def transcriber(config, transcription_queue, output_queue):
 
 def test_load_model_success(transcriber):
     """Test successful model loading."""
-    with patch("handsfreed.transcriber.WhisperModel", return_value=MagicMock()):
+    with patch(
+        "handsfreed.transcriber.WhisperModel", return_value=MagicMock()
+    ) as mock_whisper_model:
         assert transcriber.load_model() is True
         assert transcriber._model is not None
+
+        # Verify cpu_threads parameter is passed
+        mock_whisper_model.assert_called_once()
+        call_args = mock_whisper_model.call_args[1]
+        assert "cpu_threads" in call_args
+        assert call_args["cpu_threads"] == 0  # Default value
 
 
 def test_load_model_failure(transcriber):

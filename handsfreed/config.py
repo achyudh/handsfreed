@@ -59,20 +59,11 @@ class VadConfig(BaseModel):
 
     enabled: bool = False
     threshold: float = 0.5
-    min_speech_duration_ms: int = 256
-    min_silence_duration_ms: int = 1024
+    min_speech_duration_ms: int = Field(default=256, ge=1)
+    min_silence_duration_ms: int = Field(default=1024, ge=1)
     pre_roll_duration_ms: int = Field(default=192, ge=0)
     neg_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     max_speech_duration_s: float = Field(default=0.0, ge=0)
-
-    @field_validator(
-        "min_silence_duration_ms", "min_speech_duration_ms", "pre_roll_duration_ms"
-    )
-    @classmethod
-    def check_positive(cls, v: int) -> int:
-        if v <= 0:
-            raise ValueError("Durations must be positive")
-        return v
 
 
 class WhisperConfig(BaseModel):
@@ -82,21 +73,16 @@ class WhisperConfig(BaseModel):
     device: str = "auto"
     compute_type: str = "auto"
     language: Optional[str] = None
-    beam_size: int = 5
-    vad_filter: bool = False
+    beam_size: int = Field(default=5, ge=1)
+    cpu_threads: int = Field(
+        default=0, ge=0, description="Number of CPU threads for inference (0 = auto)."
+    )
 
     @field_validator("model")
     @classmethod
     def check_model_not_empty(cls, v: str) -> str:
         if not v:
             raise ValueError("Whisper model identifier cannot be empty")
-        return v
-
-    @field_validator("beam_size")
-    @classmethod
-    def check_beam_size_positive(cls, v: int) -> int:
-        if v <= 0:
-            raise ValueError("Beam size must be positive")
         return v
 
 

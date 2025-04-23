@@ -70,13 +70,15 @@ class Transcriber:
             logger.info(
                 f"Loading Whisper model '{self.whisper_config.model}' "
                 f"(Device: {self.whisper_config.device}, "
-                f"Compute: {self.whisper_config.compute_type})"
+                f"Compute: {self.whisper_config.compute_type}, "
+                f"CPU threads: {self.whisper_config.cpu_threads})"
             )
             self._model = WhisperModel(
                 self.whisper_config.model,
                 device=self.whisper_config.device,
                 compute_type=self.whisper_config.compute_type,
                 download_root=None,  # Use default location
+                cpu_threads=self.whisper_config.cpu_threads,
             )
             logger.info("Whisper model loaded successfully")
             return True

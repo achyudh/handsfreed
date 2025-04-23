@@ -1,16 +1,16 @@
 """Tests for configuration handling."""
 
-import pytest
-from pathlib import Path
 import os
+from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from handsfreed.config import (
-    load_config,
     AppConfig,
     get_default_config_path,
-    get_default_socket_path,
     get_default_log_path,
+    get_default_socket_path,
+    load_config,
 )
 
 VALID_CONFIG = {
@@ -20,7 +20,7 @@ VALID_CONFIG = {
         "compute_type": "float32",
         "language": "en",
         "beam_size": 3,
-        "vad_filter": True,
+        "cpu_threads": 4,
     },
     "vad": {
         "threshold": 0.6,
@@ -50,7 +50,7 @@ def mock_config_file(tmp_path):
         compute_type = "float32"
         language = "en"
         beam_size = 3
-        vad_filter = true
+        cpu_threads = 4
 
         [vad]
         threshold = 0.6
@@ -76,6 +76,7 @@ def test_load_config_success(mock_config_file):
     assert isinstance(config, AppConfig)
     assert config.whisper.model == "base"
     assert config.whisper.device == "cpu"
+    assert config.whisper.cpu_threads == 4
     assert config.vad.threshold == 0.6
     assert config.output.keyboard_command == "xdotool type --delay 0"
     assert config.daemon.log_level == "DEBUG"
@@ -101,7 +102,7 @@ def test_load_config_invalid_toml(tmp_path):
 
 def test_vad_config_validation():
     """Test VAD configuration validation."""
-    with pytest.raises(ValueError, match="must be positive"):
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
         AppConfig(
             **{**VALID_CONFIG, "vad": {"threshold": 0.5, "min_speech_duration_ms": -1}}
         )
@@ -109,10 +110,28 @@ def test_vad_config_validation():
 
 def test_whisper_config_validation():
     """Test Whisper configuration validation."""
-    with pytest.raises(ValueError, match="must be positive"):
+    with pytest.raises(ValueError):
         AppConfig(
             **{**VALID_CONFIG, "whisper": {**VALID_CONFIG["whisper"], "beam_size": 0}}
         )
+
+    # Test cpu_threads validation
+    with pytest.raises(ValueError):
+        AppConfig(
+            **{
+                **VALID_CONFIG,
+                "whisper": {**VALID_CONFIG["whisper"], "cpu_threads": -1},
+            }
+        )
+
+
+def test_whisper_config_defaults():
+    """Test Whisper configuration default values."""
+    # Create config with minimal whisper settings
+    config = AppConfig(**{**VALID_CONFIG, "whisper": {"model": "base"}})
+
+    # Check defaults are applied correctly
+    assert config.whisper.cpu_threads == 0
 
 
 def test_output_config_validation():
