@@ -1,15 +1,14 @@
 """Tests for transcriber module."""
 
 import asyncio
+from dataclasses import dataclass
+from unittest.mock import MagicMock, patch
+
+import numpy as np
 import pytest
 import pytest_asyncio
-import numpy as np
-from unittest.mock import MagicMock, patch
-from dataclasses import dataclass
-
 from faster_whisper import WhisperModel
-
-from handsfreed.config import AppConfig, WhisperConfig, VadConfig
+from handsfreed.config import AppConfig, WhisperConfig
 from handsfreed.ipc_models import CliOutputMode
 from handsfreed.pipelines import TranscriptionTask
 from handsfreed.transcriber import Transcriber
@@ -53,16 +52,6 @@ def config():
             compute_type="float32",
             language="en",
             beam_size=1,
-            vad_filter=True,
-        ),
-        vad=VadConfig(
-            enabled=False,
-            threshold=0.5,
-            min_speech_duration_ms=250,
-            min_silence_duration_ms=1500,
-            pre_roll_duration_ms=200,
-            neg_threshold=None,
-            max_speech_duration_s=0.0,
         ),
     )
 
@@ -207,29 +196,6 @@ async def test_transcription_empty_result(
     # No result should be put on output queue
     await asyncio.sleep(0.1)  # Give time for processing
     assert output_queue.empty()
-
-
-@pytest.mark.asyncio
-async def test_vad_parameters(transcriber, mock_model, transcription_queue):
-    """Test VAD parameters are passed correctly."""
-    transcriber._model = mock_model
-    transcriber.whisper_config.vad_filter = True
-
-    await transcriber.start()
-
-    # Create and send test task
-    test_audio = np.zeros(16000, dtype=np.float32)
-    task = TranscriptionTask(audio=test_audio, output_mode=CliOutputMode.KEYBOARD)
-    await transcription_queue.put(task)
-
-    await asyncio.sleep(0.1)  # Give time for processing
-
-    # Check VAD parameters were passed
-    call = mock_model.transcribe.mock_calls[0]  # Get first call
-    call_kwargs = call.kwargs
-    assert call_kwargs["vad_filter"] is True
-    assert "vad_parameters" in call_kwargs
-    assert call_kwargs["vad_parameters"]["threshold"] == 0.5
 
 
 @pytest.mark.asyncio

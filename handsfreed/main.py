@@ -12,8 +12,16 @@ from .ipc_server import IPCServer
 from .logging_setup import setup_logging
 from .output_handler import OutputHandler
 from .state import DaemonStateManager
-from .strategies import TimeBasedSegmentationStrategy
+from .strategies import TimeBasedSegmentationStrategy, VADSegmentationStrategy
 from .transcriber import Transcriber
+
+# Import VAD model loader
+try:
+    from faster_whisper.vad import get_vad_model
+except ImportError as e:
+    logger = logging.getLogger(__name__)
+    logger.warning(f"Failed to import VAD model: {e}")
+    get_vad_model = None
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +71,33 @@ async def main() -> int:
             logger.error("Failed to load Whisper model")
             return 1
 
-        # Create segmentation strategy (always TimeBasedSegmentationStrategy for now)
-        segmentation_strategy = TimeBasedSegmentationStrategy(
-            raw_audio_queue, transcription_queue, stop_event, config
-        )
+        # Create segmentation strategy based on configuration
+        if config.vad.enabled and get_vad_model is not None:
+            try:
+                logger.info("Loading VAD model...")
+                vad_model = get_vad_model()
+                logger.info("Using VAD-based segmentation")
+                segmentation_strategy = VADSegmentationStrategy(
+                    raw_audio_queue, transcription_queue, stop_event, config, vad_model
+                )
+            except Exception as e:
+                logger.error(f"Failed to load VAD model: {e}")
+                logger.info("Falling back to time-based segmentation")
+                segmentation_strategy = TimeBasedSegmentationStrategy(
+                    raw_audio_queue, transcription_queue, stop_event, config
+                )
+        else:
+            if config.vad.enabled and get_vad_model is None:
+                logger.warning(
+                    "VAD is enabled in config, but VAD module could not be imported. "
+                    "Falling back to time-based segmentation."
+                )
+            else:
+                logger.info("Using time-based segmentation")
+
+            segmentation_strategy = TimeBasedSegmentationStrategy(
+                raw_audio_queue, transcription_queue, stop_event, config
+            )
 
         # Start transcriber
         if not await transcriber.start():

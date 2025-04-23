@@ -1,10 +1,11 @@
 """Configuration handling for handsfreed daemon."""
 
-import tomllib
-import os
 import getpass
+import os
+import tomllib
 from pathlib import Path
 from typing import Optional
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -58,9 +59,9 @@ class VadConfig(BaseModel):
 
     enabled: bool = False
     threshold: float = 0.5
-    min_speech_duration_ms: int = 250
-    min_silence_duration_ms: int = 1500
-    pre_roll_duration_ms: int = Field(default=200, ge=0)
+    min_speech_duration_ms: int = 256
+    min_silence_duration_ms: int = 1024
+    pre_roll_duration_ms: int = Field(default=192, ge=0)
     neg_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     max_speech_duration_s: float = Field(default=0.0, ge=0)
 

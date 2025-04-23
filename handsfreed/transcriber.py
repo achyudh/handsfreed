@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from typing import Optional, Tuple
+
 import numpy as np
 from faster_whisper import WhisperModel
 
@@ -47,7 +48,6 @@ class Transcriber:
             output_queue: Queue to put (text, mode) tuples onto.
         """
         self.whisper_config = config.whisper
-        self.vad_config = config.vad
         self.transcription_queue = transcription_queue
         self.output_queue = output_queue
 
@@ -101,18 +101,12 @@ class Transcriber:
             return None, "Model not loaded"
 
         try:
-            # Prepare VAD parameters if needed
-            vad_params = None
-            if self.whisper_config.vad_filter:
-                vad_params = self.vad_config.model_dump()
-
             # Run transcription
             segments_generator, info = self._model.transcribe(
                 audio_chunk,
                 language=self.whisper_config.language,
                 beam_size=self.whisper_config.beam_size,
-                vad_filter=self.whisper_config.vad_filter,
-                vad_parameters=vad_params,
+                vad_filter=False,  # Prefer VAD segmentation strategy over model VAD
             )
 
             # Process segments into full text
@@ -125,12 +119,15 @@ class Transcriber:
                 return None, None  # Empty result
 
             # Return result with metadata
-            return TranscriptionResult(
-                text=full_text,
-                language=info.language,
-                language_probability=info.language_probability,
-                duration=info.duration,
-            ), None
+            return (
+                TranscriptionResult(
+                    text=full_text,
+                    language=info.language,
+                    language_probability=info.language_probability,
+                    duration=info.duration,
+                ),
+                None,
+            )
 
         except Exception as e:
             logger.exception("Error during transcription")
