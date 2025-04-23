@@ -103,15 +103,8 @@ class WhisperConfig(BaseModel):
 class OutputConfig(BaseModel):
     """Output command configuration."""
 
-    keyboard_command: str = "xdotool type --delay 0"  # Sensible default for X11/Wayland
-    clipboard_command: str = "wl-copy"  # Default to Wayland clipboard
-
-    @field_validator("keyboard_command", "clipboard_command")
-    @classmethod
-    def check_commands_not_empty(cls, v: str) -> str:
-        if not v:
-            raise ValueError("Output commands must not be empty")
-        return v
+    keyboard_command: Optional[str] = None
+    clipboard_command: Optional[str] = None
 
 
 class DaemonConfig(BaseModel):

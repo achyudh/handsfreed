@@ -1,22 +1,37 @@
 """Tests for output execution module."""
 
 import asyncio
+import os
 import pytest
 import pytest_asyncio
 from unittest.mock import patch, AsyncMock
 
 from handsfreed.config import OutputConfig
 from handsfreed.ipc_models import CliOutputMode
-from handsfreed.output_handler import execute_output_command, OutputHandler
+from handsfreed.output_handler import (
+    execute_output_command,
+    OutputHandler,
+    get_session_type,
+    DEFAULT_KEYBOARD_WAYLAND,
+    DEFAULT_KEYBOARD_X11,
+    DEFAULT_CLIPBOARD_WAYLAND,
+    DEFAULT_CLIPBOARD_X11,
+)
 
 
 @pytest.fixture
 def config():
     """Create test output config."""
     return OutputConfig(
-        keyboard_command="xdotool type --delay 0",
-        clipboard_command="wl-copy",
+        keyboard_command="test-keyboard-cmd",
+        clipboard_command="test-clipboard-cmd",
     )
+
+
+@pytest.fixture
+def empty_config():
+    """Create output config with no commands set."""
+    return OutputConfig()
 
 
 @pytest.fixture
@@ -34,9 +49,31 @@ async def handler(config):
         await handler.stop()
 
 
+def test_get_session_type_wayland():
+    """Test Wayland detection."""
+    with patch.dict(os.environ, {"XDG_SESSION_TYPE": "wayland"}):
+        assert get_session_type() == "wayland"
+
+
+def test_get_session_type_x11():
+    """Test X11 detection."""
+    with patch.dict(os.environ, {"XDG_SESSION_TYPE": "x11"}):
+        assert get_session_type() == "x11"
+
+
+def test_get_session_type_unknown():
+    """Test unknown session type."""
+    with patch.dict(os.environ, {"XDG_SESSION_TYPE": ""}):
+        assert get_session_type() == "unknown"
+
+    # Test with session type not set at all
+    with patch.dict(os.environ, clear=True):
+        assert get_session_type() == "unknown"
+
+
 @pytest.mark.asyncio
 async def test_execute_output_keyboard(config):
-    """Test keyboard output execution."""
+    """Test keyboard output execution with configured command."""
     mock_process = AsyncMock()
     mock_process.communicate = AsyncMock(return_value=(b"", b""))
     mock_process.returncode = 0
@@ -51,7 +88,7 @@ async def test_execute_output_keyboard(config):
         assert success is True
         assert error is None
         mock_create.assert_called_once_with(
-            "xdotool type --delay 0",
+            "test-keyboard-cmd",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -61,7 +98,7 @@ async def test_execute_output_keyboard(config):
 
 @pytest.mark.asyncio
 async def test_execute_output_clipboard(config):
-    """Test clipboard output execution."""
+    """Test clipboard output execution with configured command."""
     mock_process = AsyncMock()
     mock_process.communicate = AsyncMock(return_value=(b"", b""))
     mock_process.returncode = 0
@@ -140,6 +177,147 @@ async def test_execute_output_failure(config):
         assert success is False
         assert "Command failed with code 1" in error
         assert "test error" in error
+
+
+@pytest.mark.asyncio
+async def test_execute_output_wayland_default_keyboard(empty_config):
+    """Test default wayland keyboard command is used when config is empty."""
+    mock_process = AsyncMock()
+    mock_process.communicate = AsyncMock(return_value=(b"", b""))
+    mock_process.returncode = 0
+
+    with patch.dict(os.environ, {"XDG_SESSION_TYPE": "wayland"}):
+        with patch(
+            "asyncio.create_subprocess_shell", return_value=mock_process
+        ) as mock_create:
+            success, error = await execute_output_command(
+                "test text", CliOutputMode.KEYBOARD, empty_config
+            )
+
+            assert success is True
+            assert error is None
+            mock_create.assert_called_once_with(
+                DEFAULT_KEYBOARD_WAYLAND,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+
+@pytest.mark.asyncio
+async def test_execute_output_wayland_default_clipboard(empty_config):
+    """Test default wayland clipboard command is used when config is empty."""
+    mock_process = AsyncMock()
+    mock_process.communicate = AsyncMock(return_value=(b"", b""))
+    mock_process.returncode = 0
+
+    with patch.dict(os.environ, {"XDG_SESSION_TYPE": "wayland"}):
+        with patch(
+            "asyncio.create_subprocess_shell", return_value=mock_process
+        ) as mock_create:
+            success, error = await execute_output_command(
+                "test text", CliOutputMode.CLIPBOARD, empty_config
+            )
+
+            assert success is True
+            assert error is None
+            mock_create.assert_called_once_with(
+                DEFAULT_CLIPBOARD_WAYLAND,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+
+@pytest.mark.asyncio
+async def test_execute_output_x11_default_keyboard(empty_config):
+    """Test default x11 keyboard command is used when config is empty."""
+    mock_process = AsyncMock()
+    mock_process.communicate = AsyncMock(return_value=(b"", b""))
+    mock_process.returncode = 0
+
+    with patch.dict(os.environ, {"XDG_SESSION_TYPE": "x11"}):
+        with patch(
+            "asyncio.create_subprocess_shell", return_value=mock_process
+        ) as mock_create:
+            success, error = await execute_output_command(
+                "test text", CliOutputMode.KEYBOARD, empty_config
+            )
+
+            assert success is True
+            assert error is None
+            mock_create.assert_called_once_with(
+                DEFAULT_KEYBOARD_X11,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+
+@pytest.mark.asyncio
+async def test_execute_output_x11_default_clipboard(empty_config):
+    """Test default x11 clipboard command is used when config is empty."""
+    mock_process = AsyncMock()
+    mock_process.communicate = AsyncMock(return_value=(b"", b""))
+    mock_process.returncode = 0
+
+    with patch.dict(os.environ, {"XDG_SESSION_TYPE": "x11"}):
+        with patch(
+            "asyncio.create_subprocess_shell", return_value=mock_process
+        ) as mock_create:
+            success, error = await execute_output_command(
+                "test text", CliOutputMode.CLIPBOARD, empty_config
+            )
+
+            assert success is True
+            assert error is None
+            mock_create.assert_called_once_with(
+                DEFAULT_CLIPBOARD_X11,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+
+@pytest.mark.asyncio
+async def test_execute_output_unknown_session_type(empty_config):
+    """Test error when session type is unknown and config is empty."""
+    with patch.dict(os.environ, {"XDG_SESSION_TYPE": "unknown"}):
+        success, error = await execute_output_command(
+            "test text", CliOutputMode.KEYBOARD, empty_config
+        )
+
+        assert success is False
+        assert "No keyboard command configured and couldn't determine default" in error
+
+
+@pytest.mark.asyncio
+async def test_configured_command_overrides_default(empty_config):
+    """Test that configured command overrides default regardless of session."""
+    mock_process = AsyncMock()
+    mock_process.communicate = AsyncMock(return_value=(b"", b""))
+    mock_process.returncode = 0
+
+    # Set a command in the empty config
+    empty_config.keyboard_command = "custom-keyboard-cmd"
+
+    # Even with Wayland session, should use configured command
+    with patch.dict(os.environ, {"XDG_SESSION_TYPE": "wayland"}):
+        with patch(
+            "asyncio.create_subprocess_shell", return_value=mock_process
+        ) as mock_create:
+            success, error = await execute_output_command(
+                "test text", CliOutputMode.KEYBOARD, empty_config
+            )
+
+            assert success is True
+            assert error is None
+            mock_create.assert_called_once_with(
+                "custom-keyboard-cmd",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
 
 
 @pytest.mark.asyncio

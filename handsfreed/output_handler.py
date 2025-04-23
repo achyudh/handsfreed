@@ -2,12 +2,35 @@
 
 import asyncio
 import logging
-from typing import Tuple, Optional
+import os
+from typing import Literal, Optional, Tuple
 
 from .config import OutputConfig
 from .ipc_models import CliOutputMode
 
 logger = logging.getLogger(__name__)
+
+# Default commands by session type
+DEFAULT_KEYBOARD_WAYLAND = "wtype -"
+DEFAULT_KEYBOARD_X11 = "xdotool type --delay 0"
+DEFAULT_CLIPBOARD_WAYLAND = "wl-copy"
+DEFAULT_CLIPBOARD_X11 = "xclip -selection clipboard"
+
+
+def get_session_type() -> Literal["wayland", "x11", "unknown"]:
+    """Detect the current session type (Wayland/X11/unknown).
+
+    Returns:
+        Session type as string: "wayland", "x11", or "unknown"
+    """
+    session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
+
+    if session_type == "wayland":
+        return "wayland"
+    elif session_type == "x11":
+        return "x11"
+    else:
+        return "unknown"
 
 
 async def execute_output_command(
@@ -30,27 +53,51 @@ async def execute_output_command(
         logger.warning("Skipping output for empty text")
         return True, None
 
+    # Get session type
+    session = get_session_type()
+
     # Select command based on mode
     if output_mode == CliOutputMode.KEYBOARD:
-        command = config.keyboard_command
+        configured_cmd = config.keyboard_command
         mode_str = "keyboard"
+
+        # Get default based on session
+        if session == "wayland":
+            default_cmd = DEFAULT_KEYBOARD_WAYLAND
+        elif session == "x11":
+            default_cmd = DEFAULT_KEYBOARD_X11
+        else:
+            default_cmd = None
     else:  # CLIPBOARD
-        command = config.clipboard_command
+        configured_cmd = config.clipboard_command
         mode_str = "clipboard"
 
-    # Validate command
-    if not command:
-        msg = f"No command configured for {mode_str} output"
+        # Get default based on session
+        if session == "wayland":
+            default_cmd = DEFAULT_CLIPBOARD_WAYLAND
+        elif session == "x11":
+            default_cmd = DEFAULT_CLIPBOARD_X11
+        else:
+            default_cmd = None
+
+    # Use configured command if available, otherwise use default
+    if configured_cmd:
+        command_to_run = configured_cmd
+    elif default_cmd:
+        command_to_run = default_cmd
+        logger.debug(f"Using default {mode_str} command for {session}: {default_cmd}")
+    else:
+        msg = f"No {mode_str} command configured and couldn't determine default for session type: {session}"
         logger.error(msg)
         return False, msg
 
-    logger.debug(f"Executing {mode_str} command: {command}")
+    logger.debug(f"Executing {mode_str} command: {command_to_run}")
     logger.debug(f"Text length: {len(text)} chars")
 
     try:
         # Create subprocess with pipes
         process = await asyncio.create_subprocess_shell(
-            command,
+            command_to_run,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -66,7 +113,7 @@ async def execute_output_command(
                 # Log command output on error
                 error_msg = (
                     f"Command failed with code {process.returncode}:\n"
-                    f"Command: {command}\n"
+                    f"Command: {command_to_run}\n"
                     f"Stderr: {stderr.decode('utf-8', errors='replace')}"
                 )
                 if stdout:
@@ -83,7 +130,7 @@ async def execute_output_command(
             return True, None
 
         except asyncio.TimeoutError:
-            logger.error(f"Command timed out after {timeout}s: {command}")
+            logger.error(f"Command timed out after {timeout}s: {command_to_run}")
             # Try to kill the process
             try:
                 await process.kill()
@@ -93,12 +140,12 @@ async def execute_output_command(
             return False, f"Command timed out after {timeout}s"
 
     except FileNotFoundError:
-        msg = f"Command not found: {command}"
+        msg = f"Command not found: {command_to_run}"
         logger.error(msg)
         return False, msg
 
     except PermissionError:
-        msg = f"Permission denied executing: {command}"
+        msg = f"Permission denied executing: {command_to_run}"
         logger.error(msg)
         return False, msg
 
