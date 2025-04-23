@@ -3,7 +3,7 @@
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -48,6 +48,14 @@ def segmentation_strategy():
     return strategy
 
 
+@pytest.fixture
+def output_handler():
+    """Create a mock output handler instance."""
+    handler = AsyncMock()
+    handler.reset_spacing_state = Mock()  # Regular method, not async
+    return handler
+
+
 @pytest_asyncio.fixture
 async def ipc_server(
     socket_path,
@@ -55,6 +63,7 @@ async def ipc_server(
     shutdown_event,
     segmentation_strategy,
     audio_capture,
+    output_handler,
 ):
     """Create an IPC server instance."""
     server = IPCServer(
@@ -63,6 +72,7 @@ async def ipc_server(
         shutdown_event,
         segmentation_strategy,
         audio_capture,
+        output_handler,
     )
     try:
         yield server
@@ -239,6 +249,48 @@ async def test_status_command(ipc_server, socket_path, state_manager):
     assert response["response_type"] == "status"
     assert response["status"]["state"] == "listening"
     assert response["status"]["last_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_start_command_resets_spacing_state(
+    ipc_server, socket_path, segmentation_strategy, audio_capture, output_handler
+):
+    """Test Start command resets spacing state."""
+    await ipc_server.start()
+
+    # Send Start command
+    response = await send_command_get_response(
+        socket_path, {"command": "start", "output_mode": "keyboard"}
+    )
+
+    # Check response
+    assert response["response_type"] == "ack"
+
+    # Verify output_handler.reset_spacing_state was called
+    output_handler.reset_spacing_state.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_command_resets_spacing_state(
+    ipc_server,
+    socket_path,
+    state_manager,
+    segmentation_strategy,
+    audio_capture,
+    output_handler,
+):
+    """Test Stop command resets spacing state."""
+    await ipc_server.start()
+    state_manager.set_state(DaemonStateEnum.LISTENING)
+
+    # Send Stop command
+    response = await send_command_get_response(socket_path, {"command": "stop"})
+
+    # Check response
+    assert response["response_type"] == "ack"
+
+    # Verify output_handler.reset_spacing_state was called
+    output_handler.reset_spacing_state.assert_called_once()
 
 
 @pytest.mark.asyncio

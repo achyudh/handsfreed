@@ -368,17 +368,59 @@ async def test_handler_multiple_outputs(handler, output_queue):
 
 
 @pytest.mark.asyncio
-async def test_handler_output_failure(handler, output_queue):
-    """Test handler continues after output failure."""
-    mock_execute = AsyncMock(side_effect=[(False, "error"), (True, None)])
+async def test_spacing_state_reset(handler, output_queue):
+    """Test reset_spacing_state functionality."""
+    mock_execute = AsyncMock()
+    mock_execute.side_effect = [(True, None), (True, None), (True, None)]
 
     with patch("handsfreed.output_handler.execute_output_command", mock_execute):
         await handler.start(output_queue)
 
-        # Send two outputs, first fails
-        await output_queue.put(("fail", CliOutputMode.KEYBOARD))
-        await output_queue.put(("success", CliOutputMode.KEYBOARD))
-        await asyncio.sleep(0.2)  # Give time to process both
+        # First text should NOT have space (default state)
+        await output_queue.put(("Text1", CliOutputMode.KEYBOARD))
+        await asyncio.sleep(0.1)
+        mock_execute.assert_called_with("Text1", CliOutputMode.KEYBOARD, handler.config)
 
-        assert mock_execute.call_count == 2  # Should process both
-        assert output_queue.empty()  # Queue should be cleared
+        # Second text SHOULD have space
+        await output_queue.put(("Text2", CliOutputMode.KEYBOARD))
+        await asyncio.sleep(0.1)
+        mock_execute.assert_called_with(
+            " Text2", CliOutputMode.KEYBOARD, handler.config
+        )
+
+        # Reset state
+        handler.reset_spacing_state()
+
+        # Third text should NOT have space (after reset)
+        await output_queue.put(("Text3", CliOutputMode.KEYBOARD))
+        await asyncio.sleep(0.1)
+        mock_execute.assert_called_with("Text3", CliOutputMode.KEYBOARD, handler.config)
+
+
+@pytest.mark.asyncio
+async def test_spacing_state_on_failed_output(handler, output_queue):
+    """Test that spacing state is not updated when output fails."""
+    mock_execute = AsyncMock()
+    mock_execute.side_effect = [(True, None), (False, "Error"), (True, None)]
+
+    with patch("handsfreed.output_handler.execute_output_command", mock_execute):
+        await handler.start(output_queue)
+
+        # First text succeeds - sets needs_leading_space to True
+        await output_queue.put(("Text1", CliOutputMode.KEYBOARD))
+        await asyncio.sleep(0.1)
+        mock_execute.assert_called_with("Text1", CliOutputMode.KEYBOARD, handler.config)
+
+        # Second text fails - needs_leading_space should remain True
+        await output_queue.put(("Text2", CliOutputMode.KEYBOARD))
+        await asyncio.sleep(0.1)
+        mock_execute.assert_called_with(
+            " Text2", CliOutputMode.KEYBOARD, handler.config
+        )
+
+        # Third text should still have space (since second output failed)
+        await output_queue.put(("Text3", CliOutputMode.KEYBOARD))
+        await asyncio.sleep(0.1)
+        mock_execute.assert_called_with(
+            " Text3", CliOutputMode.KEYBOARD, handler.config
+        )

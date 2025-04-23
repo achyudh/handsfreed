@@ -167,6 +167,7 @@ class OutputHandler:
         self.config = config
         self._task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
+        self._needs_leading_space: bool = False
 
     async def _output_loop(self, input_queue: asyncio.Queue) -> None:
         """Process output requests from queue.
@@ -185,13 +186,25 @@ class OutputHandler:
                     continue
 
                 try:
-                    # Execute the output command
-                    success, error = await execute_output_command(
-                        text, mode, self.config
-                    )
-                    if not success:
-                        logger.error(f"Output failed: {error}")
+                    # Apply spacing logic - prepend space if needed
+                    if text:
+                        text_to_output = text
+                        if self._needs_leading_space:
+                            logger.debug("Prepending space to output")
+                            text_to_output = " " + text
 
+                        # Execute the output command
+                        success, error = await execute_output_command(
+                            text_to_output, mode, self.config
+                        )
+
+                        if success:
+                            # Set flag for next time only if this output succeeded
+                            self._needs_leading_space = True
+                        else:
+                            logger.error(f"Output failed: {error}")
+                    else:
+                        logger.warning("Skipping empty text output")
                 finally:
                     # Always mark task as done
                     input_queue.task_done()
@@ -219,6 +232,15 @@ class OutputHandler:
         logger.info("Starting output handler")
         self._stop_event.clear()
         self._task = asyncio.create_task(self._output_loop(input_queue))
+
+    def reset_spacing_state(self):
+        """Reset the spacing flag (e.g., after Start or Stop command).
+
+        This should be called when the transcription is restarted to ensure
+        no leading space is added to the first transcription output.
+        """
+        logger.debug("Resetting output spacing state")
+        self._needs_leading_space = False
 
     async def stop(self) -> None:
         """Stop the output handler."""

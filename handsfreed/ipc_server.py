@@ -42,6 +42,7 @@ class IPCServer:
         shutdown_event: asyncio.Event,
         segmentation_strategy: SegmentationStrategy,
         audio_capture: AudioCapture,
+        output_handler,
     ):
         """Initialize the IPC server.
 
@@ -51,12 +52,14 @@ class IPCServer:
             shutdown_event: Event to signal daemon shutdown
             segmentation_strategy: Audio segmentation strategy instance
             audio_capture: Audio capture handler instance
+            output_handler: Output handler instance for text output
         """
         self.socket_path = socket_path
         self.state_manager = state_manager
         self.shutdown_event = shutdown_event
         self.segmentation_strategy = segmentation_strategy
         self.audio_capture = audio_capture
+        self.output_handler = output_handler
 
         self._server: Optional[asyncio.Server] = None
         self._client_tasks: Set[asyncio.Task] = set()
@@ -154,6 +157,8 @@ class IPCServer:
             )
             return
 
+        # Reset spacing state after successfully starting
+        self.output_handler.reset_spacing_state()
         await self._send_response(writer, ResponseWrapper(root=AckResponse()))
 
     async def _handle_stop_command(self, writer: asyncio.StreamWriter) -> None:
@@ -173,6 +178,8 @@ class IPCServer:
         # Stop processing
         try:
             await self._stop_processing()
+            # Reset spacing state after stopping
+            self.output_handler.reset_spacing_state()
             await self._send_response(writer, ResponseWrapper(root=AckResponse()))
         except Exception as e:
             error_msg = f"Error stopping audio processing: {e}"

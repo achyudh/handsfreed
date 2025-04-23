@@ -118,6 +118,7 @@ async def main() -> int:
             shutdown_event,
             segmentation_strategy,
             audio_capture,
+            output_handler,
         )
 
         # Setup signal handlers
