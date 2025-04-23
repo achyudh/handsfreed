@@ -56,11 +56,17 @@ def get_default_log_path() -> Path:
 class VadConfig(BaseModel):
     """Voice Activity Detection configuration."""
 
+    enabled: bool = False
     threshold: float = 0.5
     min_speech_duration_ms: int = 250
     min_silence_duration_ms: int = 1500
+    pre_roll_duration_ms: int = Field(default=200, ge=0)
+    neg_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    max_speech_duration_s: float = Field(default=0.0, ge=0)
 
-    @field_validator("min_silence_duration_ms", "min_speech_duration_ms")
+    @field_validator(
+        "min_silence_duration_ms", "min_speech_duration_ms", "pre_roll_duration_ms"
+    )
     @classmethod
     def check_positive(cls, v: int) -> int:
         if v <= 0:
@@ -113,6 +119,7 @@ class DaemonConfig(BaseModel):
     log_level: str = "INFO"
     log_file: Optional[Path] = None
     socket_path: Optional[Path] = None
+    time_chunk_s: float = Field(default=5.0, gt=0)
 
     @field_validator("log_level")
     @classmethod

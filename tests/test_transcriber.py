@@ -4,15 +4,15 @@ import asyncio
 import pytest
 import pytest_asyncio
 import numpy as np
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
-from typing import List, Iterator
 
 from faster_whisper import WhisperModel
 
 from handsfreed.config import AppConfig, WhisperConfig, VadConfig
 from handsfreed.ipc_models import CliOutputMode
-from handsfreed.transcriber import Transcriber, TranscriptionResult
+from handsfreed.pipelines import TranscriptionTask
+from handsfreed.transcriber import Transcriber
 
 
 @dataclass
@@ -32,8 +32,8 @@ class MockWhisperInfo:
 
 
 @pytest.fixture
-def audio_queue():
-    """Create an audio queue."""
+def transcription_queue():
+    """Create a transcription queue."""
     return asyncio.Queue()
 
 
@@ -56,9 +56,13 @@ def config():
             vad_filter=True,
         ),
         vad=VadConfig(
+            enabled=False,
             threshold=0.5,
             min_speech_duration_ms=250,
             min_silence_duration_ms=1500,
+            pre_roll_duration_ms=200,
+            neg_threshold=None,
+            max_speech_duration_s=0.0,
         ),
     )
 
@@ -83,9 +87,9 @@ def mock_model():
 
 
 @pytest_asyncio.fixture
-async def transcriber(config, audio_queue, output_queue):
+async def transcriber(config, transcription_queue, output_queue):
     """Create a transcriber instance."""
-    trans = Transcriber(config, audio_queue, output_queue)
+    trans = Transcriber(config, transcription_queue, output_queue)
     yield trans
     # Cleanup
     if trans._transcription_task:
@@ -115,17 +119,6 @@ def test_load_model_already_loaded(transcriber, mock_model):
     assert transcriber.load_model() is True
 
 
-def test_set_output_mode(transcriber):
-    """Test setting output mode."""
-    assert transcriber._current_output_mode is None
-
-    transcriber.set_current_output_mode(CliOutputMode.KEYBOARD)
-    assert transcriber._current_output_mode == CliOutputMode.KEYBOARD
-
-    transcriber.set_current_output_mode(None)
-    assert transcriber._current_output_mode is None
-
-
 @pytest.mark.asyncio
 async def test_start_without_model(transcriber):
     """Test start fails without model."""
@@ -133,35 +126,18 @@ async def test_start_without_model(transcriber):
 
 
 @pytest.mark.asyncio
-async def test_transcription_without_output_mode(
-    transcriber, mock_model, audio_queue, output_queue
-):
-    """Test transcription skips when no output mode set."""
-    transcriber._model = mock_model
-
-    assert await transcriber.start() is True
-
-    # Send test audio (without setting output mode)
-    await audio_queue.put(np.zeros(16000, dtype=np.float32))
-    await asyncio.sleep(0.1)  # Give time for processing
-
-    assert mock_model.transcribe.called  # Should still attempt transcription
-    assert output_queue.empty()  # But should not output result
-
-
-@pytest.mark.asyncio
 async def test_transcription_success_keyboard(
-    transcriber, mock_model, audio_queue, output_queue
+    transcriber, mock_model, transcription_queue, output_queue
 ):
     """Test successful transcription to keyboard."""
     transcriber._model = mock_model
-    transcriber.set_current_output_mode(CliOutputMode.KEYBOARD)
 
     assert await transcriber.start() is True
 
-    # Send test audio
+    # Create and send test task
     test_audio = np.zeros(16000, dtype=np.float32)  # 1 second of silence
-    await audio_queue.put(test_audio)
+    task = TranscriptionTask(audio=test_audio, output_mode=CliOutputMode.KEYBOARD)
+    await transcription_queue.put(task)
 
     # Get result
     text, mode = await asyncio.wait_for(output_queue.get(), timeout=1.0)
@@ -171,17 +147,17 @@ async def test_transcription_success_keyboard(
 
 @pytest.mark.asyncio
 async def test_transcription_success_clipboard(
-    transcriber, mock_model, audio_queue, output_queue
+    transcriber, mock_model, transcription_queue, output_queue
 ):
     """Test successful transcription to clipboard."""
     transcriber._model = mock_model
-    transcriber.set_current_output_mode(CliOutputMode.CLIPBOARD)
 
     assert await transcriber.start() is True
 
-    # Send test audio
-    test_audio = np.zeros(16000, dtype=np.float32)
-    await audio_queue.put(test_audio)
+    # Create and send test task
+    test_audio = np.zeros(16000, dtype=np.float32)  # 1 second of silence
+    task = TranscriptionTask(audio=test_audio, output_mode=CliOutputMode.CLIPBOARD)
+    await transcription_queue.put(task)
 
     # Get result
     text, mode = await asyncio.wait_for(output_queue.get(), timeout=1.0)
@@ -190,14 +166,19 @@ async def test_transcription_success_clipboard(
 
 
 @pytest.mark.asyncio
-async def test_transcription_error(transcriber, mock_model, audio_queue, output_queue):
+async def test_transcription_error(
+    transcriber, mock_model, transcription_queue, output_queue
+):
     """Test handling of transcription error."""
     transcriber._model = mock_model
     mock_model.transcribe.side_effect = RuntimeError("Test error")
-    transcriber.set_current_output_mode(CliOutputMode.KEYBOARD)
 
     await transcriber.start()
-    await audio_queue.put(np.zeros(16000, dtype=np.float32))
+
+    # Create and send test task
+    test_audio = np.zeros(16000, dtype=np.float32)
+    task = TranscriptionTask(audio=test_audio, output_mode=CliOutputMode.KEYBOARD)
+    await transcription_queue.put(task)
 
     # No result should be put on output queue
     await asyncio.sleep(0.1)  # Give time for processing
@@ -206,11 +187,10 @@ async def test_transcription_error(transcriber, mock_model, audio_queue, output_
 
 @pytest.mark.asyncio
 async def test_transcription_empty_result(
-    transcriber, mock_model, audio_queue, output_queue
+    transcriber, mock_model, transcription_queue, output_queue
 ):
     """Test handling of empty transcription result."""
     transcriber._model = mock_model
-    transcriber.set_current_output_mode(CliOutputMode.KEYBOARD)
 
     # Return empty segments
     mock_model.transcribe = MagicMock(
@@ -218,7 +198,11 @@ async def test_transcription_empty_result(
     )
 
     await transcriber.start()
-    await audio_queue.put(np.zeros(16000, dtype=np.float32))
+
+    # Create and send test task
+    test_audio = np.zeros(16000, dtype=np.float32)
+    task = TranscriptionTask(audio=test_audio, output_mode=CliOutputMode.KEYBOARD)
+    await transcription_queue.put(task)
 
     # No result should be put on output queue
     await asyncio.sleep(0.1)  # Give time for processing
@@ -226,14 +210,18 @@ async def test_transcription_empty_result(
 
 
 @pytest.mark.asyncio
-async def test_vad_parameters(transcriber, mock_model, audio_queue):
+async def test_vad_parameters(transcriber, mock_model, transcription_queue):
     """Test VAD parameters are passed correctly."""
     transcriber._model = mock_model
     transcriber.whisper_config.vad_filter = True
-    transcriber.set_current_output_mode(CliOutputMode.KEYBOARD)
 
     await transcriber.start()
-    await audio_queue.put(np.zeros(16000, dtype=np.float32))
+
+    # Create and send test task
+    test_audio = np.zeros(16000, dtype=np.float32)
+    task = TranscriptionTask(audio=test_audio, output_mode=CliOutputMode.KEYBOARD)
+    await transcription_queue.put(task)
+
     await asyncio.sleep(0.1)  # Give time for processing
 
     # Check VAD parameters were passed
@@ -242,19 +230,6 @@ async def test_vad_parameters(transcriber, mock_model, audio_queue):
     assert call_kwargs["vad_filter"] is True
     assert "vad_parameters" in call_kwargs
     assert call_kwargs["vad_parameters"]["threshold"] == 0.5
-
-
-@pytest.mark.asyncio
-async def test_stop_clears_output_mode(transcriber, mock_model):
-    """Test stopping clears output mode."""
-    transcriber._model = mock_model
-    transcriber.set_current_output_mode(CliOutputMode.KEYBOARD)
-
-    await transcriber.start()
-    assert transcriber._current_output_mode is not None
-
-    await transcriber.stop()
-    assert transcriber._current_output_mode is None
 
 
 @pytest.mark.asyncio

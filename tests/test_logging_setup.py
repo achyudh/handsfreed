@@ -2,7 +2,6 @@
 
 import logging
 import pytest
-from pathlib import Path
 
 from handsfreed.logging_setup import setup_logging
 

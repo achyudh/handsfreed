@@ -2,12 +2,11 @@
 
 import asyncio
 import logging
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple
 import numpy as np
 from faster_whisper import WhisperModel
 
 from .config import AppConfig
-from .ipc_models import CliOutputMode
 
 logger = logging.getLogger(__name__)
 
@@ -18,13 +17,11 @@ class TranscriptionResult:
     def __init__(
         self,
         text: str,
-        output_mode: CliOutputMode,
         language: Optional[str] = None,
         language_probability: Optional[float] = None,
         duration: Optional[float] = None,
     ):
         self.text = text
-        self.output_mode = output_mode
         self.language = language
         self.language_probability = language_probability
         self.duration = duration
@@ -39,32 +36,25 @@ class Transcriber:
     def __init__(
         self,
         config: AppConfig,
-        audio_queue: asyncio.Queue,
+        transcription_queue: asyncio.Queue,
         output_queue: asyncio.Queue,
     ):
         """Initialize the transcriber.
 
         Args:
             config: Application configuration.
-            audio_queue: Queue to receive audio chunks from.
-            output_queue: Queue to put transcription results onto.
+            transcription_queue: Queue to receive TranscriptionTask objects.
+            output_queue: Queue to put (text, mode) tuples onto.
         """
         self.whisper_config = config.whisper
         self.vad_config = config.vad
-        self.audio_queue = audio_queue
+        self.transcription_queue = transcription_queue
         self.output_queue = output_queue
 
         # Initialize internals
         self._model: Optional[WhisperModel] = None
         self._transcription_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
-        self._current_output_mode: Optional[CliOutputMode] = None
-
-    def set_current_output_mode(self, mode: Optional[CliOutputMode]) -> None:
-        """Set the output mode for subsequent transcriptions."""
-        if mode != self._current_output_mode:
-            logger.info(f"Setting output mode to: {mode.value if mode else 'None'}")
-            self._current_output_mode = mode
 
     def load_model(self) -> bool:
         """Load the Whisper model.
@@ -134,14 +124,9 @@ class Transcriber:
             if not full_text:
                 return None, None  # Empty result
 
-            # Must have output mode set to produce result
-            if self._current_output_mode is None:
-                return None, "No output mode set"
-
             # Return result with metadata
             return TranscriptionResult(
                 text=full_text,
-                output_mode=self._current_output_mode,
                 language=info.language,
                 language_probability=info.language_probability,
                 duration=info.duration,
@@ -161,10 +146,10 @@ class Transcriber:
 
         while not self._stop_event.is_set():
             try:
-                # Get an audio chunk (with timeout to check stop event)
+                # Get a transcription task (with timeout to check stop event)
                 try:
-                    audio_chunk = await asyncio.wait_for(
-                        self.audio_queue.get(), timeout=0.5
+                    task = await asyncio.wait_for(
+                        self.transcription_queue.get(), timeout=0.5
                     )
                 except asyncio.TimeoutError:
                     continue
@@ -172,7 +157,7 @@ class Transcriber:
                 try:
                     # Run transcription in thread pool
                     result, error = await asyncio.to_thread(
-                        self._run_transcription, audio_chunk
+                        self._run_transcription, task.audio
                     )
 
                     if error:
@@ -182,7 +167,7 @@ class Transcriber:
                     if result and result.text:
                         logger.info(
                             f"Transcribed [{result.language or 'unknown'}] "
-                            f"for {result.output_mode.value}: {result.text[:100]}..."
+                            f"for {task.output_mode.value}: {result.text[:100]}..."
                         )
                         if result.language_probability is not None:
                             logger.debug(
@@ -190,13 +175,13 @@ class Transcriber:
                             )
 
                         # Put transcription and output mode on output queue
-                        await self.output_queue.put((result.text, result.output_mode))
+                        await self.output_queue.put((result.text, task.output_mode))
                     else:
                         logger.debug("No transcription result")
 
                 finally:
                     # Mark task as done
-                    self.audio_queue.task_done()
+                    self.transcription_queue.task_done()
 
             except asyncio.CancelledError:
                 logger.info("Transcription loop cancelled")
@@ -250,5 +235,3 @@ class Transcriber:
             logger.exception(f"Error stopping transcription loop: {e}")
         finally:
             self._transcription_task = None
-            # Clear output mode on stop
-            self._current_output_mode = None

@@ -14,37 +14,33 @@ SAMPLE_RATE = 16000
 NUM_CHANNELS = 1
 AUDIO_DTYPE = np.float32
 
+# Small frames for segmentation strategies
+FRAME_SIZE = 512  # frames (~32ms at 16kHz)
+
 
 class AudioCapture:
-    """Captures audio using sounddevice and provides fixed-duration chunks."""
+    """Captures audio using sounddevice and provides raw audio frames."""
 
     def __init__(
         self,
-        audio_queue: asyncio.Queue,
-        chunk_duration_s: float = 5.0,
+        raw_audio_queue: asyncio.Queue,
         device: Optional[int] = None,
         input_gain: float = 1.0,
     ):
         """Initialize audio capture.
 
         Args:
-            audio_queue: Queue to put audio chunks onto
-            chunk_duration_s: Duration of each chunk in seconds
+            raw_audio_queue: Queue to put raw audio frames onto
             device: Optional input device index (None for system default)
             input_gain: Input gain multiplier (1.0 = unity gain)
         """
-        self.audio_queue = audio_queue
-        self.chunk_duration_s = chunk_duration_s
+        self.raw_audio_queue = raw_audio_queue
         self.device = device
         self.input_gain = input_gain
 
-        # Calculate chunk size in frames
-        self.chunk_size_frames = int(self.chunk_duration_s * SAMPLE_RATE)
-
         # Initialize internal state
         self._stream: Optional[sd.InputStream] = None
-        self._buffer = np.array([], dtype=AUDIO_DTYPE)
-        self._raw_audio_q = queue.Queue()  # Thread-safe queue for callback data
+        self._raw_thread_q = queue.Queue()  # Thread-safe queue for callback data
         self._processing_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
 
@@ -75,28 +71,28 @@ class AudioCapture:
                 mono_data = mono_data * self.input_gain
 
             # Put a copy onto the thread-safe queue
-            self._raw_audio_q.put(mono_data.copy())
+            self._raw_thread_q.put(mono_data.copy())
         except Exception as e:
             # Avoid crashes in audio callback
             logger.error(f"Error in audio callback: {e}")
 
     async def _process_new_data(self) -> bool:
-        """Process new data from raw audio queue.
+        """Process new data from thread-safe queue.
 
         Returns:
             True if data was processed, False if queue was empty.
         """
         try:
-            raw_chunk = await asyncio.to_thread(self._raw_audio_q.get_nowait)
-            self._buffer = np.concatenate((self._buffer, raw_chunk))
+            raw_frame = await asyncio.to_thread(self._raw_thread_q.get_nowait)
+            # Put directly onto the asyncio queue for segmentation strategies
+            await self.raw_audio_queue.put(raw_frame)
             return True
         except queue.Empty:
             return False
 
-    async def _chunk_processor(self) -> None:
-        """Process raw audio into fixed-duration chunks."""
-        logger.info("Chunk processor task started")
-        self._buffer = np.array([], dtype=AUDIO_DTYPE)
+    async def _frame_processor(self) -> None:
+        """Process incoming audio from sounddevice callback."""
+        logger.info("Audio frame processor started")
 
         while not self._stop_event.is_set():
             try:
@@ -107,28 +103,15 @@ class AudioCapture:
                     await asyncio.sleep(0.01)
                     continue
 
-                # Process buffer if enough data for a chunk
-                while len(self._buffer) >= self.chunk_size_frames:
-                    # Extract chunk
-                    chunk = self._buffer[: self.chunk_size_frames].astype(AUDIO_DTYPE)
-                    # Remove chunk from buffer (non-overlapping for now)
-                    self._buffer = self._buffer[self.chunk_size_frames :]
-
-                    logger.debug(
-                        f"Audio chunk ready: {len(chunk)} frames "
-                        f"({len(chunk) / SAMPLE_RATE:.1f}s)"
-                    )
-                    await self.audio_queue.put(chunk)
-
             except asyncio.CancelledError:
-                logger.info("Chunk processor task cancelled")
+                logger.info("Audio frame processor task cancelled")
                 break
             except Exception as e:
-                logger.exception(f"Error in chunk processor task: {e}")
+                logger.exception(f"Error in audio frame processor task: {e}")
                 # Avoid tight loop on error
                 await asyncio.sleep(0.5)
 
-        logger.info("Chunk processor task finished")
+        logger.info("Audio frame processor finished")
 
     async def start(self) -> None:
         """Start audio capture."""
@@ -136,24 +119,19 @@ class AudioCapture:
             logger.warning("Audio capture already running")
             return
 
-        logger.info(
-            f"Starting audio capture (Device: {self.device or 'Default'}, "
-            f"Chunk Duration: {self.chunk_duration_s}s)"
-        )
+        logger.info(f"Starting audio capture (Device: {self.device or 'Default'})")
         self._stop_event.clear()
 
         # Clear the raw queue in case of restart
-        while not self._raw_audio_q.empty():
+        while not self._raw_thread_q.empty():
             try:
-                self._raw_audio_q.get_nowait()
+                self._raw_thread_q.get_nowait()
             except queue.Empty:
                 break
 
-        self._buffer = np.array([], dtype=AUDIO_DTYPE)
-
         try:
-            # Start the chunk processing task first
-            self._processing_task = asyncio.create_task(self._chunk_processor())
+            # Start the frame processing task first
+            self._processing_task = asyncio.create_task(self._frame_processor())
 
             # Start the sounddevice stream
             self._stream = sd.InputStream(
@@ -163,6 +141,7 @@ class AudioCapture:
                 dtype=AUDIO_DTYPE,
                 callback=self._audio_callback,
                 latency="low",
+                blocksize=FRAME_SIZE,  # Small blocks for faster segmentation
             )
 
             # Run potentially blocking stream start in executor
@@ -215,16 +194,16 @@ class AudioCapture:
             try:
                 # Wait with a timeout for the task to finish/cancel
                 await asyncio.wait_for(self._processing_task, timeout=2.0)
-                logger.info("Chunk processor task finished")
+                logger.info("Audio frame processor finished")
             except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for chunk processor task to finish")
+                logger.warning("Timeout waiting for audio frame processor to finish")
                 self._processing_task.cancel()
                 # Wait a bit more after cancelling
                 await asyncio.sleep(0.1)
             except asyncio.CancelledError:
-                logger.info("Chunk processor task was cancelled")
+                logger.info("Audio frame processor was cancelled")
             except Exception as e:
-                logger.exception(f"Error waiting for chunk processor task: {e}")
+                logger.exception(f"Error waiting for audio frame processor: {e}")
             finally:
                 self._processing_task = None
 

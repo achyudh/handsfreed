@@ -5,14 +5,14 @@ import pytest
 import pytest_asyncio
 import numpy as np
 import sounddevice as sd
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 
-from handsfreed.audio_capture import AudioCapture, SAMPLE_RATE, AUDIO_DTYPE
+from handsfreed.audio_capture import AudioCapture, AUDIO_DTYPE, FRAME_SIZE
 
 
 @pytest.fixture
-def audio_queue():
-    """Create an audio queue."""
+def raw_audio_queue():
+    """Create a raw audio queue."""
     return asyncio.Queue()
 
 
@@ -27,11 +27,9 @@ def mock_stream():
 
 
 @pytest_asyncio.fixture
-async def audio_capture(audio_queue):
+async def audio_capture(raw_audio_queue):
     """Create an audio capture instance."""
-    capture = AudioCapture(
-        audio_queue, chunk_duration_s=0.1
-    )  # Short chunks for testing
+    capture = AudioCapture(raw_audio_queue)
     yield capture
     # Cleanup if needed
     if capture._stream is not None:
@@ -76,31 +74,20 @@ async def test_stop_success(audio_capture, mock_stream):
 
 
 @pytest.mark.asyncio
-async def test_audio_chunking(audio_capture, mock_stream, audio_queue):
-    """Test audio data is correctly chunked."""
-    chunk_duration = 0.1  # seconds
-    chunk_size = int(SAMPLE_RATE * chunk_duration)
-    audio_capture.chunk_duration_s = chunk_duration
-
+async def test_raw_audio_processing(audio_capture, mock_stream, raw_audio_queue):
+    """Test raw audio data is correctly processed."""
     with patch("sounddevice.InputStream", return_value=mock_stream):
         await audio_capture.start()
 
-        # Feed 2.5 chunks worth of data
-        test_data = np.ones(int(chunk_size * 2.5), dtype=AUDIO_DTYPE)
+        # Feed frame-size of data
+        test_data = np.ones(FRAME_SIZE, dtype=AUDIO_DTYPE)
         await simulate_audio_data(audio_capture, test_data)
 
-        # Should get 2 full chunks
-        chunk1 = audio_queue._queue[0]  # Direct access for testing
-        assert isinstance(chunk1, np.ndarray)
-        assert len(chunk1) == chunk_size
-        assert chunk1.dtype == AUDIO_DTYPE
-
-        chunk2 = audio_queue._queue[1]
-        assert isinstance(chunk2, np.ndarray)
-        assert len(chunk2) == chunk_size
-
-        # Partial chunk should remain in buffer
-        assert len(audio_capture._buffer) == int(chunk_size * 0.5)
+        # Should get the frame on the queue
+        frame = await asyncio.wait_for(raw_audio_queue.get(), timeout=1.0)
+        assert isinstance(frame, np.ndarray)
+        assert len(frame) == FRAME_SIZE
+        assert frame.dtype == AUDIO_DTYPE
 
         await audio_capture.stop()
 
@@ -120,7 +107,7 @@ async def test_stream_error_handling(audio_capture):
 
 
 @pytest.mark.asyncio
-async def test_gain_control(audio_capture, mock_stream, audio_queue):
+async def test_gain_control(audio_capture, mock_stream, raw_audio_queue):
     """Test input gain control."""
     audio_capture.input_gain = 2.0  # Double the input
 
@@ -128,12 +115,12 @@ async def test_gain_control(audio_capture, mock_stream, audio_queue):
         await audio_capture.start()
 
         # Create test data (0.5 amplitude)
-        test_data = np.ones(SAMPLE_RATE // 10, dtype=AUDIO_DTYPE) * 0.5
+        test_data = np.ones(FRAME_SIZE, dtype=AUDIO_DTYPE) * 0.5
         await simulate_audio_data(audio_capture, test_data)
 
-        # Get processed chunk
-        chunk = audio_queue._queue[0]  # Direct access for testing
-        assert np.allclose(chunk, 1.0)  # Should be doubled from 0.5 to 1.0
+        # Get processed frame
+        frame = await asyncio.wait_for(raw_audio_queue.get(), timeout=1.0)
+        assert np.allclose(frame, 1.0)  # Should be doubled from 0.5 to 1.0
 
         await audio_capture.stop()
 

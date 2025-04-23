@@ -12,6 +12,7 @@ from .ipc_server import IPCServer
 from .logging_setup import setup_logging
 from .output_handler import OutputHandler
 from .state import DaemonStateManager
+from .strategies import TimeBasedSegmentationStrategy
 from .transcriber import Transcriber
 
 logger = logging.getLogger(__name__)
@@ -36,33 +37,56 @@ async def main() -> int:
     setup_logging(config.daemon.log_level, config.daemon.computed_log_file)
     logger.info("Starting handsfreed daemon...")
 
-    # Create state manager and shutdown event
+    # Create state manager
     state_manager = DaemonStateManager()
+
+    # Create stop/shutdown events
+    stop_event = asyncio.Event()
     shutdown_event = asyncio.Event()
 
+    # Create the processing queues
+    raw_audio_queue = asyncio.Queue()  # Raw audio frames from capture to strategy
+    transcription_queue = asyncio.Queue()  # Audio chunks from strategy to transcriber
+    output_queue = asyncio.Queue()  # Text + mode from transcriber to output
+
+    # Create component instances (but don't start them yet)
+    audio_capture = AudioCapture(raw_audio_queue)
+    transcriber = Transcriber(config, transcription_queue, output_queue)
+    output_handler = OutputHandler(config.output)
+
+    # Create and start tasks
+    tasks = []
+
     try:
-        # Create the processing queues
-        audio_queue = asyncio.Queue()  # Audio chunks from capture to transcriber
-        output_queue = asyncio.Queue()  # Text + mode from transcriber to output
-
-        # Create the components
-        audio_capture = AudioCapture(audio_queue)
-        transcriber = Transcriber(config, audio_queue, output_queue)
-        output_handler = OutputHandler(config.output)
-
         # Load the Whisper model (can take a while)
         if not transcriber.load_model():
             logger.error("Failed to load Whisper model")
             return 1
+
+        # Create segmentation strategy (always TimeBasedSegmentationStrategy for now)
+        segmentation_strategy = TimeBasedSegmentationStrategy(
+            raw_audio_queue, transcription_queue, stop_event, config
+        )
+
+        # Start transcriber
+        if not await transcriber.start():
+            logger.error("Failed to start transcriber")
+            return 1
+
+        # Start output handler
+        await output_handler.start(output_queue)
+
+        # Create and start segmentation strategy processing task
+        strategy_task = asyncio.create_task(segmentation_strategy.process())
+        tasks.append(strategy_task)
 
         # Create IPC server with all components
         ipc_server = IPCServer(
             config.daemon.computed_socket_path,
             state_manager,
             shutdown_event,
-            transcriber,
+            segmentation_strategy,
             audio_capture,
-            output_handler,
         )
 
         # Setup signal handlers
@@ -85,15 +109,46 @@ async def main() -> int:
         await shutdown_event.wait()
 
         logger.info("Starting graceful shutdown...")
-        await ipc_server.stop()  # This also stops audio/transcription/output
+
+        # Stop in reverse order to avoid dangling tasks
+        await ipc_server.stop()
+        stop_event.set()  # Signal strategies to stop
+
+        # Cancel and await all tasks
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Stop components
+        await segmentation_strategy.stop()
+        await transcriber.stop()
+        await output_handler.stop()
 
         return 0
 
-    except Exception as e:
+    except Exception:
         logger.exception("Fatal error in daemon:")
         # Try to clean up if we can
+        stop_event.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Stop components
+        if "segmentation_strategy" in locals():
+            await segmentation_strategy.stop()
+        if "transcriber" in locals():
+            await transcriber.stop()
+        if "output_handler" in locals():
+            await output_handler.stop()
         if "ipc_server" in locals():
             await ipc_server.stop()
+
         return 1
 
     finally:

@@ -3,7 +3,7 @@
 import asyncio
 import pytest
 import pytest_asyncio
-from unittest.mock import patch, AsyncMock, MagicMock
+from unittest.mock import patch, AsyncMock
 
 from handsfreed.config import OutputConfig
 from handsfreed.ipc_models import CliOutputMode

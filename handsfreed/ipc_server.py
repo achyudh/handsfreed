@@ -8,22 +8,22 @@ from typing import Optional, Set
 
 from pydantic import ValidationError
 
-from .state import DaemonStateManager, DaemonStateEnum
-from .transcriber import Transcriber
+from handsfreed.pipelines import SegmentationStrategy
+
 from .audio_capture import AudioCapture
-from .output_handler import OutputHandler
 from .ipc_models import (
-    CommandWrapper,
-    StartCommand,
-    StopCommand,
-    StatusCommand,
-    ShutdownCommand,
-    ResponseWrapper,
     AckResponse,
-    StatusResponse,
-    ErrorResponse,
+    CommandWrapper,
     DaemonStateModel,
+    ErrorResponse,
+    ResponseWrapper,
+    ShutdownCommand,
+    StartCommand,
+    StatusCommand,
+    StatusResponse,
+    StopCommand,
 )
+from .state import DaemonStateEnum, DaemonStateManager
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +40,8 @@ class IPCServer:
         socket_path: Path,
         state_manager: DaemonStateManager,
         shutdown_event: asyncio.Event,
-        transcriber: Transcriber,
+        segmentation_strategy: SegmentationStrategy,
         audio_capture: AudioCapture,
-        output_handler: OutputHandler,
     ):
         """Initialize the IPC server.
 
@@ -50,16 +49,14 @@ class IPCServer:
             socket_path: Path to the Unix domain socket
             state_manager: Daemon state manager instance
             shutdown_event: Event to signal daemon shutdown
-            transcriber: Transcription handler instance
+            segmentation_strategy: Audio segmentation strategy instance
             audio_capture: Audio capture handler instance
-            output_handler: Output handler instance
         """
         self.socket_path = socket_path
         self.state_manager = state_manager
         self.shutdown_event = shutdown_event
-        self.transcriber = transcriber
+        self.segmentation_strategy = segmentation_strategy
         self.audio_capture = audio_capture
-        self.output_handler = output_handler
 
         self._server: Optional[asyncio.Server] = None
         self._client_tasks: Set[asyncio.Task] = set()
@@ -91,28 +88,15 @@ class IPCServer:
             True if started successfully, False otherwise
         """
         try:
-            # Start components in order: output -> transcriber -> audio
-            # This ensures each component's output queue has a reader ready
-
-            # Start output handler first (ready to receive transcribed text)
-            await self.output_handler.start(self.transcriber.output_queue)
-
-            # Set transcriber output mode and start it
-            self.transcriber.set_current_output_mode(output_mode)
-            if not await self.transcriber.start():
-                await self.output_handler.stop()
-                logger.error("Failed to start transcriber")
-                return False
-
-            # Start audio capture last (will start producing data)
+            # Start audio capture
             try:
                 await self.audio_capture.start()
             except Exception as e:
-                # Clean up transcriber and output if capture fails
-                await self.transcriber.stop()
-                await self.output_handler.stop()
                 logger.error(f"Failed to start audio capture: {e}")
                 return False
+
+            # Set segmentation strategy output mode (enables processing)
+            await self.segmentation_strategy.set_active_output_mode(output_mode)
 
             # Set state to LISTENING
             self.state_manager.set_state(DaemonStateEnum.LISTENING)
@@ -128,10 +112,11 @@ class IPCServer:
         """Stop audio capture, transcription, and output handling."""
         logger.info("Stopping audio processing")
 
-        # Stop in reverse order of starting
+        # Set segmentation strategy output mode to None (stops processing)
+        await self.segmentation_strategy.set_active_output_mode(None)
+
+        # Stop audio capture
         await self.audio_capture.stop()
-        await self.transcriber.stop()
-        await self.output_handler.stop()
 
         # Return to IDLE state
         if self.state_manager.current_state != DaemonStateEnum.ERROR:
@@ -155,7 +140,7 @@ class IPCServer:
         ):
             # Just change output mode and acknowledge
             logger.info("Already processing, changing output mode")
-            self.transcriber.set_current_output_mode(command.output_mode)
+            await self.segmentation_strategy.set_active_output_mode(command.output_mode)
             await self._send_response(writer, ResponseWrapper(root=AckResponse()))
             return
 
