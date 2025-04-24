@@ -189,4 +189,4 @@ async def main() -> int:
 
 def run() -> NoReturn:
     """Entry point for the daemon."""
-    sys.exit(asyncio.run(main()))
+    asyncio.run(main())
