@@ -8,18 +8,16 @@ version = "0.1.0"
 description = "Handsfree speech-to-text daemon for Linux"
 requires-python = ">=3.11"
 dependencies = [
-    "pydantic>=2.0",  
-    "sounddevice", 
-    "numpy",
-    "faster-whisper",
-    "asyncio"
+    "pydantic>=2.0",
+    "sounddevice>=0.5",
+    "numpy>=2.2",
+    "faster-whisper>=1.1",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
-    "pytest-asyncio",
-    "ruff"
+    "pytest>=8.3",
+    "pytest-asyncio>=0.26",
 ]
 
 [tool.pytest.ini_options]
