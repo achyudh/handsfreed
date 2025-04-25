@@ -7,10 +7,10 @@ from typing import Optional, Tuple
 class DaemonStateEnum(str, Enum):
     """Possible states for the daemon."""
 
-    IDLE = "idle"
-    LISTENING = "listening"
-    PROCESSING = "processing"
-    ERROR = "error"
+    IDLE = "Idle"
+    LISTENING = "Listening"
+    PROCESSING = "Processing"
+    ERROR = "Error"
 
 
 class DaemonStateManager:

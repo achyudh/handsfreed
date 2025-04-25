@@ -247,7 +247,7 @@ async def test_status_command(ipc_server, socket_path, state_manager):
 
     # Check response
     assert response["response_type"] == "status"
-    assert response["status"]["state"] == "listening"
+    assert response["status"]["state"] == "Listening"
     assert response["status"]["last_error"] is None
 
 

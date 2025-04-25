@@ -12,7 +12,7 @@ def test_initial_state():
     assert manager.last_error is None
 
     status_state, status_error = manager.get_status()
-    assert status_state == "idle"
+    assert status_state == "Idle"
     assert status_error is None
 
 
@@ -29,7 +29,7 @@ def test_set_state():
     assert manager.last_error is None
 
     status_state, status_error = manager.get_status()
-    assert status_state == "processing"
+    assert status_state == "Processing"
     assert status_error is None
 
 
@@ -50,7 +50,7 @@ def test_set_error():
     assert manager.last_error == error_message
 
     status_state, status_error = manager.get_status()
-    assert status_state == "error"
+    assert status_state == "Error"
     assert status_error == error_message
 
 
