@@ -8,9 +8,7 @@ from typing import Optional, Set
 
 from pydantic import ValidationError
 
-from handsfreed.pipelines import SegmentationStrategy
-
-from .audio_capture import AudioCapture
+from .audio_capture import PWRecordCapture
 from .ipc_models import (
     AckResponse,
     CommandWrapper,
@@ -40,8 +38,7 @@ class IPCServer:
         socket_path: Path,
         state_manager: DaemonStateManager,
         shutdown_event: asyncio.Event,
-        segmentation_strategy: SegmentationStrategy,
-        audio_capture: AudioCapture,
+        audio_capture: PWRecordCapture,
         output_handler,
     ):
         """Initialize the IPC server.
@@ -50,14 +47,12 @@ class IPCServer:
             socket_path: Path to the Unix domain socket
             state_manager: Daemon state manager instance
             shutdown_event: Event to signal daemon shutdown
-            segmentation_strategy: Audio segmentation strategy instance
             audio_capture: Audio capture handler instance
             output_handler: Output handler instance for text output
         """
         self.socket_path = socket_path
         self.state_manager = state_manager
         self.shutdown_event = shutdown_event
-        self.segmentation_strategy = segmentation_strategy
         self.audio_capture = audio_capture
         self.output_handler = output_handler
 
@@ -82,7 +77,7 @@ class IPCServer:
             logger.error(f"Error sending response: {e}")
 
     async def _start_processing(self, output_mode) -> bool:
-        """Start audio capture, transcription, and output processing.
+        """Start audio capture.
 
         Args:
             output_mode: Output mode to use (keyboard/clipboard)
@@ -91,34 +86,20 @@ class IPCServer:
             True if started successfully, False otherwise
         """
         try:
-            # Start audio capture
-            try:
-                await self.audio_capture.start()
-            except Exception as e:
-                logger.error(f"Failed to start audio capture: {e}")
-                return False
-
-            # Set segmentation strategy output mode (enables processing)
-            await self.segmentation_strategy.set_active_output_mode(output_mode)
-
-            # Set state to LISTENING
+            await self.audio_capture.start(output_mode)
             self.state_manager.set_state(DaemonStateEnum.LISTENING)
             return True
-
         except Exception as e:
             logger.exception(f"Error starting processing: {e}")
-            # Try to clean up if something unexpected failed
-            await self._stop_processing()
+            # Ensure we are in a clean state
+            await self.audio_capture.stop()
+            self.state_manager.set_error(f"Failed to start audio capture: {e}")
             return False
 
     async def _stop_processing(self) -> None:
-        """Stop audio capture, transcription, and output handling."""
+        """Stop audio capture and transcription processing."""
         logger.info("Stopping audio processing")
 
-        # Set segmentation strategy output mode to None (stops processing)
-        await self.segmentation_strategy.set_active_output_mode(None)
-
-        # Stop audio capture
         await self.audio_capture.stop()
 
         # Return to IDLE state
@@ -141,9 +122,7 @@ class IPCServer:
             DaemonStateEnum.LISTENING,
             DaemonStateEnum.PROCESSING,
         ):
-            # Just change output mode and acknowledge
-            logger.info("Already processing, changing output mode")
-            await self.segmentation_strategy.set_active_output_mode(command.output_mode)
+            logger.warning("Received Start command while already running.")
             await self._send_response(writer, ResponseWrapper(root=AckResponse()))
             return
 

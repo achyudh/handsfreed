@@ -1,145 +1,155 @@
-"""Tests for audio capture module."""
+"""Tests for audio capture module using pw-record."""
 
 import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import numpy as np
 import pytest
 import pytest_asyncio
-import numpy as np
-import sounddevice as sd
-from unittest.mock import MagicMock, patch
 
-from handsfreed.audio_capture import AudioCapture, AUDIO_DTYPE, FRAME_SIZE
-
-
-@pytest.fixture
-def raw_audio_queue():
-    """Create a raw audio queue."""
-    return asyncio.Queue()
+from handsfreed.audio_capture import PWRecordCapture
+from handsfreed.ipc_models import CliOutputMode
+from handsfreed.pipelines import TranscriptionTask
 
 
 @pytest.fixture
-def mock_stream():
-    """Mock sounddevice.InputStream."""
-    stream = MagicMock(spec=sd.InputStream)
-    stream.start = MagicMock()
-    stream.stop = MagicMock()
-    stream.close = MagicMock()
-    return stream
+def config_mock():
+    """Create a mock configuration object for audio settings."""
+    config = MagicMock()
+    config.audio.target = "test-target"
+    return config
 
 
 @pytest_asyncio.fixture
-async def audio_capture(raw_audio_queue):
-    """Create an audio capture instance."""
-    capture = AudioCapture(raw_audio_queue)
+async def transcription_queue():
+    """Create a queue for transcription tasks."""
+    return asyncio.Queue()
+
+
+@pytest_asyncio.fixture
+async def audio_capture(config_mock, transcription_queue):
+    """Create a PWRecordCapture instance."""
+    capture = PWRecordCapture(config_mock, transcription_queue)
     yield capture
-    # Cleanup if needed
-    if capture._stream is not None:
+    # Ensure cleanup if a task is running
+    if capture._is_running:
         await capture.stop()
 
 
-async def simulate_audio_data(capture, data: np.ndarray) -> None:
-    """Helper to simulate audio data and wait for processing."""
-    # Reshape to mono if needed
-    if len(data.shape) == 1:
-        data = data.reshape(-1, 1)
+@pytest.fixture
+def mock_subprocess():
+    """Create a mock asyncio.subprocess.Process."""
+    process = AsyncMock()
+    process.pid = 1234
+    process.returncode = None
 
-    # Send via callback
-    capture._audio_callback(data, len(data), None, None)
+    # terminate() is a sync method
+    process.terminate = MagicMock()
 
-    # Give processor time to handle data
-    await asyncio.sleep(0.1)
+    # Mock stdout stream reader
+    process.stdout = AsyncMock(spec=asyncio.StreamReader)
+    # Simulate some audio data then EOF
+    fake_audio_chunk = np.array([1000, -1000, 2000, -2000], dtype=np.int16).tobytes()
+    process.stdout.read.side_effect = [fake_audio_chunk, b""]  # Send data then EOF
 
-
-@pytest.mark.asyncio
-async def test_start_success(audio_capture, mock_stream):
-    """Test successful start of audio capture."""
-    with patch("sounddevice.InputStream", return_value=mock_stream):
-        await audio_capture.start()
-
-        assert audio_capture._stream is not None
-        assert audio_capture._processing_task is not None
-        mock_stream.start.assert_called_once()
+    return process
 
 
 @pytest.mark.asyncio
-async def test_stop_success(audio_capture, mock_stream):
-    """Test successful stop of audio capture."""
-    with patch("sounddevice.InputStream", return_value=mock_stream):
-        await audio_capture.start()
+@patch("asyncio.create_subprocess_exec")
+async def test_start_success(mock_create_subprocess, audio_capture, mock_subprocess):
+    """Test that start() correctly initiates the pw-record process."""
+    mock_create_subprocess.return_value = mock_subprocess
+
+    await audio_capture.start(CliOutputMode.KEYBOARD)
+
+    # Check that subprocess was called correctly
+    mock_create_subprocess.assert_called_once_with(
+        "pw-record",
+        "--target=test-target",
+        "--rate=16000",
+        "--format=s16",
+        "--channels=1",
+        "-",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+
+    assert audio_capture._is_running is True
+    assert audio_capture._process is mock_subprocess
+    assert audio_capture._reader_task is not None
+    assert audio_capture._output_mode == CliOutputMode.KEYBOARD
+
+    # Clean up the task to avoid warnings
+    if audio_capture._reader_task:
+        audio_capture._reader_task.cancel()
+        try:
+            await audio_capture._reader_task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+@patch("asyncio.create_subprocess_exec")
+async def test_stop_and_transcribe(mock_create_subprocess, audio_capture, mock_subprocess, transcription_queue):
+    """Test that stop() terminates the process and queues a transcription task."""
+    mock_create_subprocess.return_value = mock_subprocess
+
+    # Start capture
+    await audio_capture.start(CliOutputMode.KEYBOARD)
+
+    # Let the reader task run to populate the buffer
+    await asyncio.sleep(0.01)
+
+    # Stop capture
+    await audio_capture.stop()
+
+    # Assertions
+    assert audio_capture._is_running is False
+    mock_subprocess.terminate.assert_called_once()
+
+    # Check that a task was put on the transcription queue
+    assert not transcription_queue.empty()
+    task = await transcription_queue.get()
+    assert isinstance(task, TranscriptionTask)
+    assert task.output_mode == CliOutputMode.KEYBOARD
+
+    # Verify the audio data is correct
+    int_array = np.array([1000, -1000, 2000, -2000], dtype=np.int16)
+    expected_array = int_array.astype(np.float32) * (1.0 / 32768.0)
+    np.testing.assert_allclose(task.audio, expected_array, atol=1e-5)
+
+
+@pytest.mark.asyncio
+@patch("asyncio.create_subprocess_exec")
+async def test_start_while_running(mock_create_subprocess, audio_capture, mock_subprocess):
+    """Test that calling start() while already running is a no-op."""
+    mock_create_subprocess.return_value = mock_subprocess
+
+    await audio_capture.start(CliOutputMode.KEYBOARD)
+    # Check it was called the first time
+    mock_create_subprocess.assert_called_once()
+
+    # Try to start again
+    await audio_capture.start(CliOutputMode.CLIPBOARD)
+    # Should not have been called again
+    mock_create_subprocess.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_when_not_running(audio_capture):
+    """Test that calling stop() when not running is a no-op."""
+    # Patch the queue to ensure no task is added
+    with patch.object(audio_capture.transcription_queue, "put") as mock_put:
         await audio_capture.stop()
-
-        assert audio_capture._stream is None
-        assert audio_capture._processing_task is None
-        mock_stream.stop.assert_called_once()
-        mock_stream.close.assert_called_once()
+        mock_put.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_raw_audio_processing(audio_capture, mock_stream, raw_audio_queue):
-    """Test raw audio data is correctly processed."""
-    with patch("sounddevice.InputStream", return_value=mock_stream):
-        await audio_capture.start()
+@patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError("pw-record not found"))
+async def test_pw_record_not_found(mock_create_subprocess, audio_capture):
+    """Test that a FileNotFoundError is raised if pw-record is not found."""
+    with pytest.raises(FileNotFoundError, match="pw-record not found"):
+        await audio_capture.start(CliOutputMode.KEYBOARD)
 
-        # Feed frame-size of data
-        test_data = np.ones(FRAME_SIZE, dtype=AUDIO_DTYPE)
-        await simulate_audio_data(audio_capture, test_data)
-
-        # Should get the frame on the queue
-        frame = await asyncio.wait_for(raw_audio_queue.get(), timeout=1.0)
-        assert isinstance(frame, np.ndarray)
-        assert len(frame) == FRAME_SIZE
-        assert frame.dtype == AUDIO_DTYPE
-
-        await audio_capture.stop()
-
-
-@pytest.mark.asyncio
-async def test_stream_error_handling(audio_capture):
-    """Test handling of PortAudio errors."""
-    mock_stream = MagicMock(spec=sd.InputStream)
-    mock_stream.start.side_effect = sd.PortAudioError("Test error")
-
-    with patch("sounddevice.InputStream", return_value=mock_stream):
-        with pytest.raises(sd.PortAudioError, match="Test error"):
-            await audio_capture.start()
-
-        assert audio_capture._stream is None
-        assert audio_capture._processing_task is None
-
-
-@pytest.mark.asyncio
-async def test_gain_control(audio_capture, mock_stream, raw_audio_queue):
-    """Test input gain control."""
-    audio_capture.input_gain = 2.0  # Double the input
-
-    with patch("sounddevice.InputStream", return_value=mock_stream):
-        await audio_capture.start()
-
-        # Create test data (0.5 amplitude)
-        test_data = np.ones(FRAME_SIZE, dtype=AUDIO_DTYPE) * 0.5
-        await simulate_audio_data(audio_capture, test_data)
-
-        # Get processed frame
-        frame = await asyncio.wait_for(raw_audio_queue.get(), timeout=1.0)
-        assert np.allclose(frame, 1.0)  # Should be doubled from 0.5 to 1.0
-
-        await audio_capture.stop()
-
-
-@pytest.mark.asyncio
-async def test_multiple_start_stop(audio_capture, mock_stream):
-    """Test multiple start/stop cycles."""
-    with patch("sounddevice.InputStream", return_value=mock_stream):
-        # First cycle
-        await audio_capture.start()
-        assert audio_capture._stream is not None
-        await audio_capture.stop()
-        assert audio_capture._stream is None
-
-        # Second cycle
-        await audio_capture.start()
-        assert audio_capture._stream is not None
-        await audio_capture.stop()
-        assert audio_capture._stream is None
-
-        assert mock_stream.start.call_count == 2
-        assert mock_stream.stop.call_count == 2
+    assert audio_capture._is_running is False

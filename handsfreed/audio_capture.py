@@ -2,209 +2,169 @@
 
 import asyncio
 import logging
-import queue
 import numpy as np
-import sounddevice as sd
-from typing import Optional
+from typing import List, Optional
+
+from .config import AppConfig
+from .ipc_models import CliOutputMode
+from .pipelines import TranscriptionTask
 
 logger = logging.getLogger(__name__)
 
 # Settings required by Whisper model
 SAMPLE_RATE = 16000
 NUM_CHANNELS = 1
-AUDIO_DTYPE = np.float32
+AUDIO_FORMAT = "s16"  # Signed 16-bit
 
-# Small frames for segmentation strategies
-FRAME_SIZE = 512  # frames (~32ms at 16kHz)
+# Define a buffer size for reading from stdout
+BUFFER_SIZE = 4096
+
+# Conversion factor for s16 to float32
+INT16_TO_FLOAT32 = 1.0 / 32768.0
 
 
-class AudioCapture:
-    """Captures audio using sounddevice and provides raw audio frames."""
+class PWRecordCapture:
+    """Captures audio using a pw-record subprocess."""
 
-    def __init__(
-        self,
-        raw_audio_queue: asyncio.Queue,
-        device: Optional[int] = None,
-        input_gain: float = 1.0,
-    ):
+    def __init__(self, config: AppConfig, transcription_queue: asyncio.Queue):
         """Initialize audio capture.
 
         Args:
-            raw_audio_queue: Queue to put raw audio frames onto
-            device: Optional input device index (None for system default)
-            input_gain: Input gain multiplier (1.0 = unity gain)
+            config: The application configuration.
+            transcription_queue: Queue to put final TranscriptionTask onto.
         """
-        self.raw_audio_queue = raw_audio_queue
-        self.device = device
-        self.input_gain = input_gain
+        self.audio_config = config.audio
+        self.transcription_queue = transcription_queue
 
-        # Initialize internal state
-        self._stream: Optional[sd.InputStream] = None
-        self._raw_thread_q = queue.Queue()  # Thread-safe queue for callback data
-        self._processing_task: Optional[asyncio.Task] = None
-        self._stop_event = asyncio.Event()
+        # Internal state
+        self._process: Optional[asyncio.subprocess.Process] = None
+        self._reader_task: Optional[asyncio.Task] = None
+        self._audio_buffer: List[bytes] = []
+        self._output_mode: Optional[CliOutputMode] = None
+        self._is_running = False
 
-    def _audio_callback(
-        self,
-        indata: np.ndarray,
-        frames: int,
-        time,  # time info from sounddevice (unused)
-        status: sd.CallbackFlags,
-    ) -> None:
-        """Callback for sounddevice's InputStream.
-
-        Args:
-            indata: Input audio data (frames x channels)
-            frames: Number of frames in indata
-            time: CData time info (unused)
-            status: Status flags
-        """
-        if status:
-            logger.warning(f"Audio callback status: {status}")
-
-        try:
-            # Ensure mono and normalize
-            mono_data = indata[:, 0] if indata.shape[1] > 1 else indata.flatten()
-
-            # Apply input gain
-            if self.input_gain != 1.0:
-                mono_data = mono_data * self.input_gain
-
-            # Put a copy onto the thread-safe queue
-            self._raw_thread_q.put(mono_data.copy())
-        except Exception as e:
-            # Avoid crashes in audio callback
-            logger.error(f"Error in audio callback: {e}")
-
-    async def _process_new_data(self) -> bool:
-        """Process new data from thread-safe queue.
-
-        Returns:
-            True if data was processed, False if queue was empty.
-        """
-        try:
-            raw_frame = await asyncio.to_thread(self._raw_thread_q.get_nowait)
-            # Put directly onto the asyncio queue for segmentation strategies
-            await self.raw_audio_queue.put(raw_frame)
-            return True
-        except queue.Empty:
-            return False
-
-    async def _frame_processor(self) -> None:
-        """Process incoming audio from sounddevice callback."""
-        logger.info("Audio frame processor started")
-
-        while not self._stop_event.is_set():
-            try:
-                # Try to get and process new data
-                got_data = await self._process_new_data()
-                if not got_data:
-                    # No new data, yield control
-                    await asyncio.sleep(0.01)
-                    continue
-
-            except asyncio.CancelledError:
-                logger.info("Audio frame processor task cancelled")
-                break
-            except Exception as e:
-                logger.exception(f"Error in audio frame processor task: {e}")
-                # Avoid tight loop on error
-                await asyncio.sleep(0.5)
-
-        logger.info("Audio frame processor finished")
-
-    async def start(self) -> None:
-        """Start audio capture."""
-        if self._stream is not None or self._processing_task is not None:
-            logger.warning("Audio capture already running")
+    async def _read_audio_stream(self):
+        """Reads audio data from the subprocess stdout."""
+        if not self._process or not self._process.stdout:
+            logger.error("Audio process or stdout not available for reading.")
             return
 
-        logger.info(f"Starting audio capture (Device: {self.device or 'Default'})")
-        self._stop_event.clear()
+        logger.info("Audio reader task started.")
+        try:
+            while True:
+                data = await self._process.stdout.read(BUFFER_SIZE)
+                if not data:
+                    logger.info("pw-record stdout stream ended.")
+                    break
+                self._audio_buffer.append(data)
+        except asyncio.CancelledError:
+            logger.info("Audio reader task cancelled.")
+        except Exception as e:
+            logger.exception(f"Error in audio reader task: {e}")
+        finally:
+            logger.info("Audio reader task finished.")
 
-        # Clear the raw queue in case of restart
-        while not self._raw_thread_q.empty():
-            try:
-                self._raw_thread_q.get_nowait()
-            except queue.Empty:
-                break
+    async def start(self, output_mode: CliOutputMode) -> None:
+        """Start audio capture.
+
+        Args:
+            output_mode: The output mode for the transcription.
+        """
+        if self._is_running:
+            logger.warning("Audio capture is already running.")
+            return
+
+        logger.info(f"Starting audio capture with pw-record (Output: {output_mode.value})")
+        self._is_running = True
+        self._output_mode = output_mode
+        self._audio_buffer.clear()
+
+        # Construct pw-record command
+        command = [
+            "pw-record",
+            f"--target={self.audio_config.target}",
+            f"--rate={SAMPLE_RATE}",
+            f"--format={AUDIO_FORMAT}",
+            f"--channels={NUM_CHANNELS}",
+            "-",
+        ]
 
         try:
-            # Start the frame processing task first
-            self._processing_task = asyncio.create_task(self._frame_processor())
-
-            # Start the sounddevice stream
-            self._stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                device=self.device,
-                channels=NUM_CHANNELS,
-                dtype=AUDIO_DTYPE,
-                callback=self._audio_callback,
-                latency="low",
-                blocksize=FRAME_SIZE,  # Small blocks for faster segmentation
+            self._process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
             )
+            logger.info(f"Started pw-record process with PID: {self._process.pid}")
 
-            # Run potentially blocking stream start in executor
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._stream.start)
+            # Start the task to read from stdout
+            self._reader_task = asyncio.create_task(self._read_audio_stream())
 
-            logger.info("Audio capture started")
-
-        except sd.PortAudioError as e:
-            logger.error(f"PortAudio error starting audio stream: {e}")
-            if self._processing_task and not self._processing_task.done():
-                self._processing_task.cancel()
-            self._stream = None
-            self._processing_task = None
+        except FileNotFoundError:
+            logger.error(
+                "'pw-record' command not found. Please ensure PipeWire is installed."
+            )
+            self._is_running = False
             raise
         except Exception as e:
-            logger.exception(f"Failed to start audio capture: {e}")
-            if self._processing_task and not self._processing_task.done():
-                self._processing_task.cancel()
-            self._stream = None
-            self._processing_task = None
+            logger.exception("Failed to start pw-record process.")
+            self._is_running = False
             raise
 
     async def stop(self) -> None:
-        """Stop audio capture."""
-        if self._stream is None and self._processing_task is None:
-            logger.warning("Audio capture not running")
+        """Stop audio capture and queue the result for transcription."""
+        if not self._is_running:
+            logger.warning("Audio capture is not running.")
             return
 
-        logger.info("Stopping audio capture...")
-        self._stop_event.set()  # Signal processor task to stop
+        logger.info("Stopping audio capture.")
 
-        # Stop and close the stream
-        if self._stream is not None:
+        # Stop the reader task
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
             try:
-                # Run potentially blocking stream stop/close in executor
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self._stream.stop)
-                await loop.run_in_executor(None, self._stream.close)
-                logger.info("Audio stream stopped and closed")
-            except sd.PortAudioError as e:
-                logger.error(f"PortAudio error stopping audio stream: {e}")
-            except Exception as e:
-                logger.exception(f"Error stopping audio stream: {e}")
-            finally:
-                self._stream = None
-
-        # Wait for the processing task to finish
-        if self._processing_task is not None:
-            try:
-                # Wait with a timeout for the task to finish/cancel
-                await asyncio.wait_for(self._processing_task, timeout=2.0)
-                logger.info("Audio frame processor finished")
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for audio frame processor to finish")
-                self._processing_task.cancel()
-                # Wait a bit more after cancelling
-                await asyncio.sleep(0.1)
+                await self._reader_task
             except asyncio.CancelledError:
-                logger.info("Audio frame processor was cancelled")
-            except Exception as e:
-                logger.exception(f"Error waiting for audio frame processor: {e}")
-            finally:
-                self._processing_task = None
+                logger.debug("Audio reader task successfully cancelled.")
 
-        logger.info("Audio capture stopped")
+        # Stop the process
+        if self._process and self._process.returncode is None:
+            try:
+                self._process.terminate()
+                await asyncio.wait_for(self._process.wait(), timeout=2.0)
+                logger.info("pw-record process terminated.")
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for pw-record to terminate, killing.")
+                self._process.kill()
+            except Exception as e:
+                logger.exception(f"Error stopping pw-record process: {e}")
+
+        self._process = None
+        self._reader_task = None
+
+        if not self._audio_buffer or not self._output_mode:
+            logger.warning("No audio was recorded or output mode not set, skipping transcription.")
+            self._is_running = False
+            return
+
+        # Process the buffered audio
+        logger.info(f"Processing {len(self._audio_buffer)} recorded audio chunks.")
+        full_audio_bytes = b"".join(self._audio_buffer)
+
+        # Convert raw s16 bytes to float32 numpy array
+        try:
+            audio_array = np.frombuffer(full_audio_bytes, dtype=np.int16).astype(np.float32) * INT16_TO_FLOAT32
+
+            # Create and queue the transcription task
+            task = TranscriptionTask(audio=audio_array, output_mode=self._output_mode)
+            await self.transcription_queue.put(task)
+            logger.info("Queued final audio segment for transcription.")
+
+        except Exception as e:
+            logger.exception("Error processing recorded audio.")
+
+        # Reset state
+        self._audio_buffer.clear()
+        self._output_mode = None
+        self._is_running = False
+        logger.info("Audio capture stopped and buffer cleared.")

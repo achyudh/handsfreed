@@ -14,11 +14,10 @@ let
   pythonDependencies = ps:
     with ps; [
       # Dependencies from pyproject.toml
-      toml # >=0.10
-      sounddevice # >=0.4 (May need system libs like portaudio, see below)
-      faster-whisper # >=1.0 (Check availability and version in your nixpkgs)
-      numpy # >=1.2
+      numpy # >=1.26
       pydantic # >=2.0
+      faster-whisper # >=1.0
+      onnxruntime # >=1.18.0
 
       # Build dependencies
       pytest
@@ -38,23 +37,14 @@ in pkgs.mkShell {
     # The Python environment itself, including all specified packages.
     pythonEnv
 
-    # System libraries that might be needed by Python packages.
-    # 'sounddevice' often requires PortAudio.
-    pkgs.portaudio
+    # You will need pipewire for pw-record.
+    # pkgs.pipewire
 
-    # You might need ALSA libraries on Linux as well/instead, depending
-    # on how sounddevice/portaudio is configured or used.
+    # You might need ALSA libraries on Linux as well.
     # pkgs.alsa-lib
   ];
 
-  # Optional: Commands to run automatically when entering the shell.
   shellHook = ''
-    echo "Entered ${name}"
-    echo "Python version: $(python --version)"
-    # You can add other setup commands here, like setting environment variables.
-    # For example, if your project needs to be in the Python path:
-    # export PYTHONPATH="$PWD:$PYTHONPATH"
-    # echo "PYTHONPATH set to: $PYTHONPATH"
-    echo "Run 'python' or 'pytest'..."
+    python -m handsfreed
   '';
 }

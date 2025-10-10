@@ -54,16 +54,10 @@ def get_default_log_path() -> Path:
     return log_dir / "handsfreed.log"
 
 
-class VadConfig(BaseModel):
-    """Voice Activity Detection configuration."""
+class AudioConfig(BaseModel):
+    """Audio capture configuration."""
 
-    enabled: bool = False
-    threshold: float = 0.5
-    min_speech_duration_ms: int = Field(default=256, ge=1)
-    min_silence_duration_ms: int = Field(default=1024, ge=1)
-    pre_roll_duration_ms: int = Field(default=192, ge=0)
-    neg_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    max_speech_duration_s: float = Field(default=0.0, ge=0)
+    target: str = "auto"
 
 
 class WhisperConfig(BaseModel):
@@ -99,7 +93,6 @@ class DaemonConfig(BaseModel):
     log_level: str = "INFO"
     log_file: Optional[Path] = None
     socket_path: Optional[Path] = None
-    time_chunk_s: float = Field(default=5.0, gt=0)
 
     @field_validator("log_level")
     @classmethod
@@ -122,8 +115,8 @@ class DaemonConfig(BaseModel):
 class AppConfig(BaseModel):
     """Root configuration."""
 
+    audio: AudioConfig = Field(default_factory=AudioConfig)
     whisper: WhisperConfig = Field(default_factory=WhisperConfig)
-    vad: VadConfig = Field(default_factory=VadConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
 

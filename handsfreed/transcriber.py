@@ -108,7 +108,7 @@ class Transcriber:
                 audio_chunk,
                 language=self.whisper_config.language,
                 beam_size=self.whisper_config.beam_size,
-                vad_filter=False,  # Prefer VAD segmentation strategy over model VAD
+                vad_filter=False,
             )
 
             # Process segments into full text

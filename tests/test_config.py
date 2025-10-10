@@ -14,6 +14,7 @@ from handsfreed.config import (
 )
 
 VALID_CONFIG = {
+    "audio": {"target": "test-device"},
     "whisper": {
         "model": "base",
         "device": "cpu",
@@ -21,11 +22,6 @@ VALID_CONFIG = {
         "language": "en",
         "beam_size": 3,
         "cpu_threads": 4,
-    },
-    "vad": {
-        "threshold": 0.6,
-        "min_speech_duration_ms": 300,
-        "min_silence_duration_ms": 2000,
     },
     "output": {
         "keyboard_command": "xdotool type --delay 0",
@@ -44,6 +40,9 @@ def mock_config_file(tmp_path):
     """Creates a mock config file with valid TOML content."""
     config_file = tmp_path / "config.toml"
     config_content = """
+        [audio]
+        target = "test-device"
+
         [whisper]
         model = "base"
         device = "cpu"
@@ -51,11 +50,6 @@ def mock_config_file(tmp_path):
         language = "en"
         beam_size = 3
         cpu_threads = 4
-
-        [vad]
-        threshold = 0.6
-        min_speech_duration_ms = 300
-        min_silence_duration_ms = 2000
 
         [output]
         keyboard_command = "xdotool type --delay 0"
@@ -74,10 +68,10 @@ def test_load_config_success(mock_config_file):
     """Test loading a valid configuration file."""
     config = load_config(mock_config_file)
     assert isinstance(config, AppConfig)
+    assert config.audio.target == "test-device"
     assert config.whisper.model == "base"
     assert config.whisper.device == "cpu"
     assert config.whisper.cpu_threads == 4
-    assert config.vad.threshold == 0.6
     assert config.output.keyboard_command == "xdotool type --delay 0"
     assert config.daemon.log_level == "DEBUG"
 
@@ -86,10 +80,9 @@ def test_load_config_missing_uses_defaults():
     """Test loading with no config file uses defaults."""
     config = load_config(Path("/nonexistent/config.toml"))
     assert isinstance(config, AppConfig)
-    assert config.whisper.model == "small.en"  # Check default
-    assert config.output.keyboard_command is None  # Check default is None now
-    assert config.output.clipboard_command is None  # Check default is None now
-    assert config.daemon.log_level == "INFO"  # Check default
+    assert config.audio.target == "auto"
+    assert config.whisper.model == "small.en"
+    assert config.daemon.log_level == "INFO"
 
 
 def test_load_config_invalid_toml(tmp_path):
@@ -98,14 +91,6 @@ def test_load_config_invalid_toml(tmp_path):
     invalid_file.write_text("invalid { toml = syntax")
     with pytest.raises(ValueError, match="Error decoding TOML file"):
         load_config(invalid_file)
-
-
-def test_vad_config_validation():
-    """Test VAD configuration validation."""
-    with pytest.raises(ValueError, match="greater than or equal to 1"):
-        AppConfig(
-            **{**VALID_CONFIG, "vad": {"threshold": 0.5, "min_speech_duration_ms": -1}}
-        )
 
 
 def test_whisper_config_validation():
@@ -132,21 +117,6 @@ def test_whisper_config_defaults():
 
     # Check defaults are applied correctly
     assert config.whisper.cpu_threads == 0
-
-
-def test_output_config_validation():
-    """Test output configuration validation."""
-    # Since we've changed OutputConfig to allow None values,
-    # this test is no longer relevant. Now we'll just verify
-    # that empty strings are still valid.
-    config = AppConfig(
-        **{
-            **VALID_CONFIG,
-            "output": {"keyboard_command": "", "clipboard_command": "wl-copy"},
-        }
-    )
-    assert config.output.keyboard_command == ""
-    assert config.output.clipboard_command == "wl-copy"
 
 
 def test_daemon_config_validation():
@@ -218,7 +188,6 @@ def test_computed_paths():
         VALID_CONFIG["daemon"]["socket_path"]
     )
 
-    # Test defaults when not specified
-    minimal_config = AppConfig()  # All defaults
+    minimal_config = AppConfig()
     assert minimal_config.daemon.computed_log_file == get_default_log_path()
     assert minimal_config.daemon.computed_socket_path == get_default_socket_path()
