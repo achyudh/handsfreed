@@ -197,17 +197,10 @@ class VADSegmentationStrategy(SegmentationStrategy):
                         self.raw_audio_queue.task_done()
                         continue
 
-                    # Prepare frame for VAD model (ensure it's the right shape/type)
-                    if raw_frame.ndim == 1:
-                        # Reshape 1D array (num_samples,) to 2D (1, num_samples)
-                        vad_frame = raw_frame.reshape(1, -1)
-                    else:
-                        vad_frame = raw_frame
-
                     # Run VAD model inference (in a thread to avoid blocking)
                     try:
                         speech_prob = await asyncio.to_thread(
-                            self.vad_model, vad_frame, FRAME_SIZE
+                            self.vad_model, raw_frame, FRAME_SIZE
                         )
                         is_speech_prob_high = speech_prob >= self.vad_config.threshold
                         # Use neg_threshold if defined, otherwise just invert the main threshold check
