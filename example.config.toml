@@ -43,7 +43,7 @@ min_speech_duration_ms = 256
 # Minimum duration for a silence segment (ms)
 min_silence_duration_ms = 1024
 
-# Pre-roll duration in milliseconds (captures audio before speech starts)
+# Pre-roll duration (ms) to include before a detected speech segment.
 pre_roll_duration_ms = 192
 
 # Optional negative threshold (must be between 0.0 and 1.0)
