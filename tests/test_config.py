@@ -1,5 +1,3 @@
-"""Tests for configuration handling."""
-
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +12,11 @@ from handsfreed.config import (
 )
 
 VALID_CONFIG = {
+    "audio": {
+        "input_gain": 1.5,
+        "dc_offset_correction": True,
+        "dc_offset_window_ms": 600,
+    },
     "whisper": {
         "model": "base",
         "device": "cpu",
@@ -44,6 +47,11 @@ def mock_config_file(tmp_path):
     """Creates a mock config file with valid TOML content."""
     config_file = tmp_path / "config.toml"
     config_content = """
+        [audio]
+        input_gain = 1.5
+        dc_offset_correction = true
+        dc_offset_window_ms = 600
+
         [whisper]
         model = "base"
         device = "cpu"
@@ -74,6 +82,9 @@ def test_load_config_success(mock_config_file):
     """Test loading a valid configuration file."""
     config = load_config(mock_config_file)
     assert isinstance(config, AppConfig)
+    assert config.audio.input_gain == 1.5
+    assert config.audio.dc_offset_correction is True
+    assert config.audio.dc_offset_window_ms == 600
     assert config.whisper.model == "base"
     assert config.whisper.device == "cpu"
     assert config.whisper.cpu_threads == 4
@@ -86,6 +97,9 @@ def test_load_config_missing_uses_defaults():
     """Test loading with no config file uses defaults."""
     config = load_config(Path("/nonexistent/config.toml"))
     assert isinstance(config, AppConfig)
+    assert config.audio.input_gain == 1.0
+    assert config.audio.dc_offset_correction is True
+    assert config.audio.dc_offset_window_ms == 512
     assert config.whisper.model == "small.en"  # Check default
     assert config.output.keyboard_command is None  # Check default is None now
     assert config.output.clipboard_command is None  # Check default is None now
@@ -98,6 +112,18 @@ def test_load_config_invalid_toml(tmp_path):
     invalid_file.write_text("invalid { toml = syntax")
     with pytest.raises(ValueError, match="Error decoding TOML file"):
         load_config(invalid_file)
+
+
+def test_audio_config_validation():
+    """Test Audio configuration validation."""
+    with pytest.raises(ValueError, match="greater than 0"):
+        AppConfig(
+            **{**VALID_CONFIG, "audio": {"input_gain": 0.0}}
+        )
+    with pytest.raises(ValueError, match="greater than or equal to 0"):
+        AppConfig(
+            **{**VALID_CONFIG, "audio": {"dc_offset_window_ms": -1}}
+        )
 
 
 def test_vad_config_validation():

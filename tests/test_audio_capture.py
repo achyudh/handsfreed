@@ -8,6 +8,7 @@ import sounddevice as sd
 from unittest.mock import MagicMock, patch
 
 from handsfreed.audio_capture import AudioCapture, AUDIO_DTYPE, FRAME_SIZE
+from handsfreed.config import AudioConfig
 
 
 @pytest.fixture
@@ -29,7 +30,8 @@ def mock_stream():
 @pytest_asyncio.fixture
 async def audio_capture(raw_audio_queue):
     """Create an audio capture instance."""
-    capture = AudioCapture(raw_audio_queue)
+    audio_config = AudioConfig()
+    capture = AudioCapture(raw_audio_queue, audio_config)
     yield capture
     # Cleanup if needed
     if capture._stream is not None:
@@ -109,18 +111,46 @@ async def test_stream_error_handling(audio_capture):
 @pytest.mark.asyncio
 async def test_gain_control(audio_capture, mock_stream, raw_audio_queue):
     """Test input gain control."""
-    audio_capture.input_gain = 2.0  # Double the input
+    audio_capture.audio_config.input_gain = 2.0  # Double the input
+    # Disable DC offset for this specific test to isolate gain functionality
+    audio_capture.audio_config.dc_offset_correction = False
 
     with patch("sounddevice.InputStream", return_value=mock_stream):
         await audio_capture.start()
 
-        # Create test data (0.5 amplitude)
-        test_data = np.ones(FRAME_SIZE, dtype=AUDIO_DTYPE) * 0.5
+        # Create a sine wave with amplitude 0.5
+        t = np.linspace(0, FRAME_SIZE / 16000, FRAME_SIZE, endpoint=False)
+        test_data = 0.5 * np.sin(2 * np.pi * 440 * t).astype(AUDIO_DTYPE)
+        
         await simulate_audio_data(audio_capture, test_data)
 
         # Get processed frame
         frame = await asyncio.wait_for(raw_audio_queue.get(), timeout=1.0)
-        assert np.allclose(frame, 1.0)  # Should be doubled from 0.5 to 1.0
+        
+        # The peak of the sine wave should be doubled from 0.5 to 1.0
+        assert np.allclose(np.max(frame), 1.0, atol=1e-6)
+
+        await audio_capture.stop()
+
+
+@pytest.mark.asyncio
+async def test_dc_offset_correction(audio_capture, mock_stream, raw_audio_queue):
+    """Test DC offset correction."""
+    audio_capture.audio_config.dc_offset_correction = True
+
+    with patch("sounddevice.InputStream", return_value=mock_stream):
+        await audio_capture.start()
+
+        # Create test data with a DC offset of 0.2
+        test_data = np.ones(FRAME_SIZE, dtype=AUDIO_DTYPE) * 0.5 + 0.2
+        await simulate_audio_data(audio_capture, test_data)
+
+        # Get processed frame
+        frame = await asyncio.wait_for(raw_audio_queue.get(), timeout=1.0)
+        
+        # The running average will not be perfect on the first frame, but it should be close
+        # For a single frame, the offset removed will be the mean of that frame.
+        assert np.allclose(frame.mean(), 0, atol=1e-6)
 
         await audio_capture.stop()
 

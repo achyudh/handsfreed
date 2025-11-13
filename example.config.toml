@@ -1,5 +1,16 @@
 # Example configuration for handsfreed daemon
 
+[audio]
+# Input gain multiplier. Useful for quiet microphones. (1.0 = no gain)
+# input_gain = 1.5
+
+# Enable/disable DC offset correction. This helps with microphones that have a DC bias.
+dc_offset_correction = true
+
+# Window size (ms) for the running average of the DC offset correction.
+dc_offset_window_ms = 512
+
+
 [whisper]
 # Model to use (supported models: tiny.en, base.en, small.en, medium.en, large)
 model = "small.en"

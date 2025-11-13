@@ -58,7 +58,7 @@ async def main() -> int:
     output_queue = asyncio.Queue()  # Text + mode from transcriber to output
 
     # Create component instances (but don't start them yet)
-    audio_capture = AudioCapture(raw_audio_queue)
+    audio_capture = AudioCapture(raw_audio_queue, config.audio)
     transcriber = Transcriber(config, transcription_queue, output_queue)
     output_handler = OutputHandler(config.output)
 

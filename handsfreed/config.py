@@ -54,6 +54,20 @@ def get_default_log_path() -> Path:
     return log_dir / "handsfreed.log"
 
 
+class AudioConfig(BaseModel):
+    """Audio processing configuration."""
+
+    input_gain: float = Field(
+        default=1.0, gt=0, description="Input gain multiplier."
+    )
+    dc_offset_correction: bool = Field(
+        default=True, description="Enable DC offset correction on raw audio."
+    )
+    dc_offset_window_ms: int = Field(
+        default=512, ge=0, description="Window size (ms) for DC offset calculation."
+    )
+
+
 class VadConfig(BaseModel):
     """Voice Activity Detection configuration."""
 
@@ -122,6 +136,7 @@ class DaemonConfig(BaseModel):
 class AppConfig(BaseModel):
     """Root configuration."""
 
+    audio: AudioConfig = Field(default_factory=AudioConfig)
     whisper: WhisperConfig = Field(default_factory=WhisperConfig)
     vad: VadConfig = Field(default_factory=VadConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)

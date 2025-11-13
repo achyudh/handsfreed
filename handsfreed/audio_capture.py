@@ -1,11 +1,14 @@
 """Audio capture module."""
 
 import asyncio
+import collections
 import logging
 import queue
 import numpy as np
 import sounddevice as sd
 from typing import Optional
+
+from .config import AudioConfig
 
 logger = logging.getLogger(__name__)
 
@@ -24,25 +27,31 @@ class AudioCapture:
     def __init__(
         self,
         raw_audio_queue: asyncio.Queue,
+        audio_config: AudioConfig,
         device: Optional[int] = None,
-        input_gain: float = 1.0,
     ):
         """Initialize audio capture.
 
         Args:
             raw_audio_queue: Queue to put raw audio frames onto
+            audio_config: Audio configuration object.
             device: Optional input device index (None for system default)
-            input_gain: Input gain multiplier (1.0 = unity gain)
         """
         self.raw_audio_queue = raw_audio_queue
+        self.audio_config = audio_config
         self.device = device
-        self.input_gain = input_gain
 
         # Initialize internal state
         self._stream: Optional[sd.InputStream] = None
         self._raw_thread_q = queue.Queue()  # Thread-safe queue for callback data
         self._processing_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
+
+        # Buffer for running DC offset calculation
+        frame_duration_ms = (FRAME_SIZE / SAMPLE_RATE) * 1000
+        dc_offset_buffer_maxlen = max(1, round(self.audio_config.dc_offset_window_ms / frame_duration_ms))
+        self._dc_offset_buffer: collections.deque = collections.deque(maxlen=dc_offset_buffer_maxlen)
+
 
     def _audio_callback(
         self,
@@ -63,12 +72,18 @@ class AudioCapture:
             logger.warning(f"Audio callback status: {status}")
 
         try:
-            # Ensure mono and normalize
+            # Ensure mono
             mono_data = indata[:, 0] if indata.shape[1] > 1 else indata.flatten()
 
+            # Correct DC offset
+            if self.audio_config.dc_offset_correction:
+                self._dc_offset_buffer.append(np.mean(mono_data))
+                running_offset = np.mean(self._dc_offset_buffer)
+                mono_data = mono_data - running_offset
+
             # Apply input gain
-            if self.input_gain != 1.0:
-                mono_data = mono_data * self.input_gain
+            if self.audio_config.input_gain != 1.0:
+                mono_data = mono_data * self.audio_config.input_gain
 
             # Put a copy onto the thread-safe queue
             self._raw_thread_q.put(mono_data.copy())
@@ -121,6 +136,7 @@ class AudioCapture:
 
         logger.info(f"Starting audio capture (Device: {self.device or 'Default'})")
         self._stop_event.clear()
+        self._dc_offset_buffer.clear()
 
         # Clear the raw queue in case of restart
         while not self._raw_thread_q.empty():
