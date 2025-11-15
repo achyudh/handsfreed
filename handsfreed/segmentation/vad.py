@@ -10,18 +10,115 @@ from typing import Deque, List
 import numpy as np
 
 from ..audio_capture import AUDIO_DTYPE, FRAME_SIZE, SAMPLE_RATE
+import abc
 from ..pipeline import TranscriptionTask
 from .strategy import SegmentationStrategy
 
 logger = logging.getLogger(__name__)
 
 
-class VADState(enum.Enum):
-    """States for the VAD state machine."""
+class AbstractVADState(abc.ABC):
+    """Abstract base class for VAD states."""
 
-    SILENT = "silent"
-    SPEECH = "speech"
-    ENDING_SPEECH = "ending_speech"
+    @abc.abstractmethod
+    async def handle_vad_result(
+        self,
+        strategy: "VADSegmentationStrategy",
+        speech_prob: float,
+        raw_frame: np.ndarray,
+    ) -> "AbstractVADState":
+        """Handle the VAD result for the current state."""
+        raise NotImplementedError
+
+    def __str__(self) -> str:
+        """Return the name of the state."""
+        return self.__class__.__name__
+
+
+class SilentState(AbstractVADState):
+    """Represents the state where no speech is detected."""
+
+    async def handle_vad_result(
+        self,
+        strategy: "VADSegmentationStrategy",
+        speech_prob: float,
+        raw_frame: np.ndarray,
+    ) -> "AbstractVADState":
+        """Handle VAD result in SILENT state."""
+        if speech_prob >= strategy.vad_config.threshold:
+            logger.debug(f"VAD: SILENT -> SPEECH (speech_prob={speech_prob})")
+            # Add pre-roll buffer content to current segment
+            for pre_frame in strategy._pre_roll_buffer:
+                strategy._current_segment.append(pre_frame)
+            return SpeechState()
+        return self
+
+
+class SpeechState(AbstractVADState):
+    """Represents the state where speech is being detected."""
+
+    async def handle_vad_result(
+        self,
+        strategy: "VADSegmentationStrategy",
+        speech_prob: float,
+        raw_frame: np.ndarray,
+    ) -> "AbstractVADState":
+        """Handle VAD result in SPEECH state."""
+        strategy._current_segment.append(raw_frame)
+
+        # Check if max speech duration exceeded
+        if strategy.vad_config.max_speech_duration_s > 0:
+            current_duration_s = (
+                sum(len(f) for f in strategy._current_segment) / SAMPLE_RATE
+            )
+            if current_duration_s >= strategy.vad_config.max_speech_duration_s:
+                logger.debug(
+                    f"VAD: Max speech duration reached ({current_duration_s:.1f}s)"
+                )
+                await strategy._finalize_segment()
+                return SilentState()
+
+        is_speech_prob_low = speech_prob <= (
+            strategy.vad_config.neg_threshold
+            if strategy.vad_config.neg_threshold is not None
+            else strategy.vad_config.threshold
+        )
+        if is_speech_prob_low:
+            logger.debug(f"VAD: SPEECH -> ENDING_SPEECH (speech_prob={speech_prob})")
+            return EndingSpeechState()
+
+        return self
+
+
+class EndingSpeechState(AbstractVADState):
+    """Represents the state where speech has just ended."""
+
+    def __init__(self):
+        """Initialize the state."""
+        self._silence_start_time = time.monotonic()
+
+    async def handle_vad_result(
+        self,
+        strategy: "VADSegmentationStrategy",
+        speech_prob: float,
+        raw_frame: np.ndarray,
+    ) -> "AbstractVADState":
+        """Handle VAD result in ENDING_SPEECH state."""
+        strategy._current_segment.append(raw_frame)
+
+        if speech_prob >= strategy.vad_config.threshold:
+            logger.debug(f"VAD: ENDING_SPEECH -> SPEECH (speech_prob={speech_prob})")
+            return SpeechState()
+
+        silence_duration_ms = (time.monotonic() - self._silence_start_time) * 1000
+        if silence_duration_ms >= strategy.vad_config.min_silence_duration_ms:
+            logger.debug(
+                f"VAD: ENDING_SPEECH -> SILENT (silence={silence_duration_ms:.0f}ms)"
+            )
+            await strategy._finalize_segment()
+            return SilentState()
+
+        return self
 
 
 class VADSegmentationStrategy(SegmentationStrategy):
@@ -50,8 +147,7 @@ class VADSegmentationStrategy(SegmentationStrategy):
         self.vad_model = vad_model
 
         # Initialize state
-        self._vad_state = VADState.SILENT
-        self._silence_start_time = 0
+        self._current_vad_state: AbstractVADState = SilentState()
         self._current_segment: List[np.ndarray] = []
 
         # Calculate pre-roll buffer size in frames
@@ -83,80 +179,20 @@ class VADSegmentationStrategy(SegmentationStrategy):
         # Run VAD model inference (in a thread to avoid blocking)
         try:
             speech_prob = await asyncio.to_thread(self.vad_model, raw_frame, FRAME_SIZE)
-            is_speech_prob_high = speech_prob >= self.vad_config.threshold
-            # Use neg_threshold if defined, otherwise just invert the main threshold check
-            is_speech_prob_low = speech_prob <= (
-                self.vad_config.neg_threshold
-                if self.vad_config.neg_threshold is not None
-                else self.vad_config.threshold
-            )
         except Exception as e:
             logger.warning(f"Error in VAD inference: {e}")
             # Treat as silent on error
-            is_speech_prob_high = False
-            is_speech_prob_low = True
+            speech_prob = 0.0
 
-        # Process audio based on current state
-        if self._vad_state == VADState.SILENT:
-            if is_speech_prob_high:
-                # Transition to SPEECH state
-                logger.debug(f"VAD: SILENT -> SPEECH (speech_prob={speech_prob})")
-                self._vad_state = VADState.SPEECH
-
-                # Add pre-roll buffer content to current segment
-                for pre_frame in self._pre_roll_buffer:
-                    self._current_segment.append(pre_frame)
-
-                # Reset the silence timer
-                self._silence_start_time = 0
-
-        elif self._vad_state == VADState.SPEECH:
-            # Add current frame to segment
-            self._current_segment.append(raw_frame)
-
-            # Check if max speech duration exceeded
-            if self.vad_config.max_speech_duration_s > 0:
-                current_duration_s = (
-                    sum(len(f) for f in self._current_segment) / SAMPLE_RATE
-                )
-                if current_duration_s >= self.vad_config.max_speech_duration_s:
-                    logger.debug(
-                        f"VAD: Max speech duration reached ({current_duration_s:.1f}s)"
-                    )
-                    await self._finalize_segment()
-                    self._vad_state = VADState.SILENT
-                    return
-
-            if is_speech_prob_low:
-                # Start timing silence
-                logger.debug(
-                    f"VAD: SPEECH -> ENDING_SPEECH (speech_prob={speech_prob})"
-                )
-                self._vad_state = VADState.ENDING_SPEECH
-                self._silence_start_time = time.monotonic()
-
-        elif self._vad_state == VADState.ENDING_SPEECH:
-            # Always add frame to current segment in ENDING_SPEECH state
-            self._current_segment.append(raw_frame)
-
-            if is_speech_prob_high:
-                # Resume speech, go back to SPEECH state
-                logger.debug(
-                    f"VAD: ENDING_SPEECH -> SPEECH (speech_prob={speech_prob})"
-                )
-                self._vad_state = VADState.SPEECH
-                self._silence_start_time = 0
-            else:
-                # Check if silence duration exceeded threshold
-                silence_duration_ms = (
-                    time.monotonic() - self._silence_start_time
-                ) * 1000
-                if silence_duration_ms >= self.vad_config.min_silence_duration_ms:
-                    logger.debug(
-                        f"VAD: ENDING_SPEECH -> SILENT (silence={silence_duration_ms:.0f}ms)"
-                    )
-                    await self._finalize_segment()
-                    self._vad_state = VADState.SILENT
+        # Delegate handling to the current state
+        new_state = await self._current_vad_state.handle_vad_result(
+            self, speech_prob, raw_frame
+        )
+        if new_state is not self._current_vad_state:
+            logger.debug(
+                f"VAD state transition: {self._current_vad_state} -> {new_state}"
+            )
+            self._current_vad_state = new_state
 
     async def _on_stop(self) -> None:
         """Hook for cleanup logic when the component stops."""
@@ -167,18 +203,16 @@ class VADSegmentationStrategy(SegmentationStrategy):
         # Clear for memory cleanup
         self._current_segment = []
         self._pre_roll_buffer.clear()
+        self._current_vad_state = SilentState()
 
     async def _finalize_segment(self) -> None:
         """Finalize the current speech segment and send for transcription."""
         # Skip if no active output mode or empty segment
         if self._active_mode is None or not self._current_segment:
             self._current_segment = []
-            self._silence_start_time = 0
             return
 
         # Check minimum speech duration
-        logging.debug(f"Current Segment: {len(self._current_segment)}")
-        logging.debug(f"Pre Roll Buffer: {len(self._pre_roll_buffer)}")
         if self.vad_config.min_speech_duration_ms > 0:
             speech_duration_ms = (
                 sum(len(f) for f in self._current_segment) / SAMPLE_RATE * 1000
@@ -189,7 +223,6 @@ class VADSegmentationStrategy(SegmentationStrategy):
                     f"{self.vad_config.min_speech_duration_ms}ms)"
                 )
                 self._current_segment = []
-                self._silence_start_time = 0
                 return
 
         # Concatenate audio frames into a single array
@@ -204,6 +237,5 @@ class VADSegmentationStrategy(SegmentationStrategy):
         task = TranscriptionTask(audio=final_audio, output_mode=self._active_mode)
         await self.output_queue.put(task)
 
-        # Reset segment and silence timer
+        # Reset segment
         self._current_segment = []
-        self._silence_start_time = 0
