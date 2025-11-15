@@ -12,7 +12,7 @@ from .ipc_server import IPCServer
 from .logging_setup import setup_logging
 from .output_handler import OutputHandler
 from .state import DaemonStateManager
-from .strategies import TimeBasedSegmentationStrategy, VADSegmentationStrategy
+from .segmentation import FixedSegmentationStrategy, VADSegmentationStrategy
 from .transcriber import Transcriber
 
 # Import VAD model loader
@@ -82,20 +82,20 @@ async def main() -> int:
                 )
             except Exception as e:
                 logger.error(f"Failed to load VAD model: {e}")
-                logger.info("Falling back to time-based segmentation")
-                segmentation_strategy = TimeBasedSegmentationStrategy(
+                logger.info("Falling back to fixed-duration segmentation")
+                segmentation_strategy = FixedSegmentationStrategy(
                     raw_audio_queue, transcription_queue, stop_event, config
                 )
         else:
             if config.vad.enabled and get_vad_model is None:
                 logger.warning(
                     "VAD is enabled in config, but VAD module could not be imported. "
-                    "Falling back to time-based segmentation."
+                    "Falling back to fixed-duration segmentation."
                 )
             else:
-                logger.info("Using time-based segmentation")
+                logger.info("Using fixed-duration segmentation")
 
-            segmentation_strategy = TimeBasedSegmentationStrategy(
+            segmentation_strategy = FixedSegmentationStrategy(
                 raw_audio_queue, transcription_queue, stop_event, config
             )
 

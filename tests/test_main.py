@@ -2,7 +2,7 @@
 
 import asyncio
 import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
+from unittest.mock import patch, AsyncMock, MagicMock, Mock
 
 from handsfreed.main import main
 from handsfreed.config import AppConfig
@@ -29,7 +29,8 @@ def mock_handlers():
         patch("handsfreed.main.AudioCapture") as mock_audio,
         patch("handsfreed.main.Transcriber") as mock_trans,
         patch("handsfreed.main.OutputHandler") as mock_output,
-        patch("handsfreed.main.TimeBasedSegmentationStrategy") as mock_strategy,
+        patch("handsfreed.main.FixedSegmentationStrategy") as mock_fixed_strategy,
+        patch("handsfreed.main.VADSegmentationStrategy") as mock_vad_strategy,
         patch("handsfreed.main.asyncio.Event") as mock_event,
     ):
         # Configure event mock to return our events
@@ -40,15 +41,19 @@ def mock_handlers():
         audio = AsyncMock()
         trans = AsyncMock()
         output = AsyncMock()
-        strategy = AsyncMock()
-        strategy.process = AsyncMock(return_value=None)
+        fixed_strategy_instance = AsyncMock()
+        fixed_strategy_instance.process = AsyncMock(return_value=None)
+        vad_strategy_instance = AsyncMock()
+        vad_strategy_instance.process = AsyncMock(return_value=None)
+
 
         # Configure mock constructors
         mock_ipc.return_value = ipc
         mock_audio.return_value = audio
         mock_trans.return_value = trans
         mock_output.return_value = output
-        mock_strategy.return_value = strategy
+        mock_fixed_strategy.return_value = fixed_strategy_instance
+        mock_vad_strategy.return_value = vad_strategy_instance
 
         # Make transcriber.load_model return True (not async)
         trans.load_model = MagicMock(return_value=True)
@@ -58,9 +63,12 @@ def mock_handlers():
             "audio": audio,
             "trans": trans,
             "output": output,
-            "strategy": strategy,
+            "fixed_strategy": fixed_strategy_instance,
+            "vad_strategy": vad_strategy_instance,
             "shutdown_event": shutdown_event,
             "stop_event": stop_event,
+            "mock_fixed_strategy_class": mock_fixed_strategy,
+            "mock_vad_strategy_class": mock_vad_strategy,
         }
 
 
@@ -87,13 +95,13 @@ async def test_main_startup_shutdown(mock_config, mock_handlers):
         mock_handlers["trans"].load_model.assert_called_once()
         mock_handlers["trans"].start.assert_awaited_once()
         mock_handlers["output"].start.assert_awaited_once()
-        mock_handlers["strategy"].process.assert_awaited_once()
+        mock_handlers["fixed_strategy"].process.assert_awaited_once()
         mock_handlers["ipc"].start.assert_awaited_once()
 
         # Verify shutdown
         mock_handlers["ipc"].stop.assert_awaited_once()
         assert mock_handlers["stop_event"].is_set()
-        mock_handlers["strategy"].stop.assert_awaited_once()
+        mock_handlers["fixed_strategy"].stop.assert_awaited_once()
         mock_handlers["trans"].stop.assert_awaited_once()
         mock_handlers["output"].stop.assert_awaited_once()
 
@@ -122,7 +130,7 @@ async def test_main_model_load_failure(mock_config, mock_handlers):
 
     # Verify nothing was started
     mock_handlers["ipc"].start.assert_not_awaited()
-    mock_handlers["strategy"].process.assert_not_awaited()
+    mock_handlers["fixed_strategy"].process.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -152,19 +160,20 @@ async def test_main_startup_error(mock_config, mock_handlers):
 
     # Verify cleanup attempted
     mock_handlers["stop_event"].is_set()
-    mock_handlers["strategy"].stop.assert_awaited_once()
+    mock_handlers["fixed_strategy"].stop.assert_awaited_once()
     mock_handlers["trans"].stop.assert_awaited_once()
     mock_handlers["output"].stop.assert_awaited_once()
     mock_handlers["ipc"].stop.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_strategy_selection(mock_config, mock_handlers):
-    """Test that TimeBasedSegmentationStrategy is selected."""
-    with patch("handsfreed.main.TimeBasedSegmentationStrategy") as mock_time_strategy:
-        strategy_instance = AsyncMock()
-        strategy_instance.process = AsyncMock()
-        mock_time_strategy.return_value = strategy_instance
+async def test_vad_strategy_selection(mock_config, mock_handlers):
+    """Test that VADSegmentationStrategy is selected when VAD is enabled."""
+    mock_config.vad.enabled = True
+    mock_config.vad.min_silence_duration_ms = 1000 # Ensure VAD config is valid
+
+    with patch("handsfreed.main.get_vad_model") as mock_get_vad_model:
+        mock_get_vad_model.return_value = Mock() # Mock a successful VAD model load
 
         # Start main briefly
         main_task = asyncio.create_task(main())
@@ -172,6 +181,26 @@ async def test_strategy_selection(mock_config, mock_handlers):
         mock_handlers["shutdown_event"].set()
         await main_task
 
-        # Verify TimeBasedSegmentationStrategy was created
-        mock_time_strategy.assert_called_once()
-        strategy_instance.process.assert_awaited_once()
+        # Verify VADSegmentationStrategy was created
+        mock_handlers["mock_vad_strategy_class"].assert_called_once()
+        mock_handlers["vad_strategy"].process.assert_awaited_once()
+        mock_handlers["mock_fixed_strategy_class"].assert_not_called()
+        mock_get_vad_model.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_strategy_selection(mock_config, mock_handlers):
+    """Test that FixedSegmentationStrategy is selected by default."""
+    # Ensure VAD is disabled in config for this test
+    mock_config.vad.enabled = False
+
+    # Start main briefly
+    main_task = asyncio.create_task(main())
+    await asyncio.sleep(0.1)
+    mock_handlers["shutdown_event"].set()
+    await main_task
+
+    # Verify FixedSegmentationStrategy was created
+    mock_handlers["mock_fixed_strategy_class"].assert_called_once()
+    mock_handlers["fixed_strategy"].process.assert_awaited_once()
+    mock_handlers["mock_vad_strategy_class"].assert_not_called()

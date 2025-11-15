@@ -9,11 +9,11 @@ import pytest_asyncio
 from handsfreed.audio_capture import FRAME_SIZE, SAMPLE_RATE
 from handsfreed.ipc_models import CliOutputMode
 from handsfreed.pipelines import TranscriptionTask
-from handsfreed.strategies import (
-    TimeBasedSegmentationStrategy,
+from handsfreed.segmentation import (
+    FixedSegmentationStrategy,
     VADSegmentationStrategy,
-    VADState,
 )
+from handsfreed.segmentation.vad import VADState
 
 
 @pytest.fixture
@@ -56,9 +56,9 @@ def stop_event():
 
 
 @pytest_asyncio.fixture
-async def time_strategy(raw_audio_queue, transcription_queue, stop_event, config_mock):
-    """Create a TimeBasedSegmentationStrategy instance."""
-    strategy = TimeBasedSegmentationStrategy(
+async def fixed_strategy(raw_audio_queue, transcription_queue, stop_event, config_mock):
+    """Create a FixedSegmentationStrategy instance."""
+    strategy = FixedSegmentationStrategy(
         raw_audio_queue, transcription_queue, stop_event, config_mock
     )
     yield strategy
@@ -115,67 +115,67 @@ async def vad_strategy(
 
 
 @pytest.mark.asyncio
-async def test_time_strategy_init(time_strategy, config_mock):
-    """Test TimeBasedSegmentationStrategy initialization."""
-    assert time_strategy.chunk_duration_s == config_mock.daemon.time_chunk_s
-    assert time_strategy.chunk_size_frames == int(
+async def test_fixed_strategy_init(fixed_strategy, config_mock):
+    """Test FixedSegmentationStrategy initialization."""
+    assert fixed_strategy.chunk_duration_s == config_mock.daemon.time_chunk_s
+    assert fixed_strategy.chunk_size_frames == int(
         config_mock.daemon.time_chunk_s * SAMPLE_RATE
     )
-    assert time_strategy._active_mode is None
-    assert isinstance(time_strategy._buffer, np.ndarray)
-    assert len(time_strategy._buffer) == 0
+    assert fixed_strategy._active_mode is None
+    assert isinstance(fixed_strategy._buffer, np.ndarray)
+    assert len(fixed_strategy._buffer) == 0
 
 
 @pytest.mark.asyncio
-async def test_time_strategy_set_active_mode(time_strategy):
+async def test_fixed_strategy_set_active_mode(fixed_strategy):
     """Test setting active output mode."""
     # Initially None
-    assert time_strategy._active_mode is None
+    assert fixed_strategy._active_mode is None
 
     # Set to KEYBOARD
-    await time_strategy.set_active_output_mode(CliOutputMode.KEYBOARD)
-    assert time_strategy._active_mode == CliOutputMode.KEYBOARD
+    await fixed_strategy.set_active_output_mode(CliOutputMode.KEYBOARD)
+    assert fixed_strategy._active_mode == CliOutputMode.KEYBOARD
 
     # Set to CLIPBOARD
-    await time_strategy.set_active_output_mode(CliOutputMode.CLIPBOARD)
-    assert time_strategy._active_mode == CliOutputMode.CLIPBOARD
+    await fixed_strategy.set_active_output_mode(CliOutputMode.CLIPBOARD)
+    assert fixed_strategy._active_mode == CliOutputMode.CLIPBOARD
 
     # Set back to None (should clear buffer)
-    time_strategy._buffer = np.ones(100, dtype=np.float32)
-    await time_strategy.set_active_output_mode(None)
-    assert time_strategy._active_mode is None
-    assert len(time_strategy._buffer) == 0
+    fixed_strategy._buffer = np.ones(100, dtype=np.float32)
+    await fixed_strategy.set_active_output_mode(None)
+    assert fixed_strategy._active_mode is None
+    assert len(fixed_strategy._buffer) == 0
 
 
 @pytest.mark.asyncio
-async def test_time_strategy_process_chunk(time_strategy):
-    """Test time-based strategy produces chunks correctly."""
+async def test_fixed_strategy_process_chunk(fixed_strategy):
+    """Test fixed-duration strategy produces chunks correctly."""
     # Set active mode
-    await time_strategy.set_active_output_mode(CliOutputMode.KEYBOARD)
+    await fixed_strategy.set_active_output_mode(CliOutputMode.KEYBOARD)
 
     # Create test audio frames (each 0.1s at SAMPLE_RATE)
     frame_size = int(0.1 * SAMPLE_RATE)
     frames = [np.ones(frame_size, dtype=np.float32) * i for i in range(1, 6)]
 
     # Start processing in background
-    process_task = asyncio.create_task(time_strategy.process())
+    process_task = asyncio.create_task(fixed_strategy.process())
 
     try:
         # Put frames on the queue
         for frame in frames:
-            await time_strategy.raw_audio_queue.put(frame)
+            await fixed_strategy.raw_audio_queue.put(frame)
             # Let the loop process
             await asyncio.sleep(0.01)
 
         # Check we got a transcription task with the right audio
         # (0.5s chunk size with 5 * 0.1s frames = 1 complete chunk)
-        assert not time_strategy.transcription_queue.empty()
+        assert not fixed_strategy.transcription_queue.empty()
 
-        task = await time_strategy.transcription_queue.get()
+        task = await fixed_strategy.transcription_queue.get()
         assert isinstance(task, TranscriptionTask)
         assert task.output_mode == CliOutputMode.KEYBOARD
         assert isinstance(task.audio, np.ndarray)
-        assert len(task.audio) == time_strategy.chunk_size_frames
+        assert len(task.audio) == fixed_strategy.chunk_size_frames
 
         # The task should contain the first 0.5s of audio (first 5 frames)
         assert np.array_equal(task.audio[:frame_size], np.ones(frame_size) * 1)
@@ -203,26 +203,26 @@ async def test_time_strategy_process_chunk(time_strategy):
 
 
 @pytest.mark.asyncio
-async def test_time_strategy_no_output_when_inactive(time_strategy):
-    """Test time-based strategy doesn't produce output when inactive."""
+async def test_fixed_strategy_no_output_when_inactive(fixed_strategy):
+    """Test fixed-duration strategy doesn't produce output when inactive."""
     # Make sure active mode is None
-    await time_strategy.set_active_output_mode(None)
+    await fixed_strategy.set_active_output_mode(None)
 
     # Create test audio frames (each 0.1s at SAMPLE_RATE)
     frame_size = int(0.1 * SAMPLE_RATE)
     frames = [np.ones(frame_size, dtype=np.float32) * i for i in range(1, 10)]
 
     # Start processing in background
-    process_task = asyncio.create_task(time_strategy.process())
+    process_task = asyncio.create_task(fixed_strategy.process())
 
     try:
         # Put frames on the queue (should produce 1.5 chunks worth of data)
         for frame in frames:
-            await time_strategy.raw_audio_queue.put(frame)
+            await fixed_strategy.raw_audio_queue.put(frame)
             await asyncio.sleep(0.01)
 
         # Check no transcription tasks were produced
-        assert time_strategy.transcription_queue.empty()
+        assert fixed_strategy.transcription_queue.empty()
 
     finally:
         # Clean up the process task
@@ -235,8 +235,8 @@ async def test_time_strategy_no_output_when_inactive(time_strategy):
 
 
 @pytest.mark.asyncio
-async def test_time_strategy_stop():
-    """Test stopping time-based strategy processing."""
+async def test_fixed_strategy_stop():
+    """Test stopping fixed-duration strategy processing."""
     # Create a mock queue
     raw_queue = asyncio.Queue()
     trans_queue = asyncio.Queue()
@@ -246,7 +246,7 @@ async def test_time_strategy_stop():
     config.daemon.time_chunk_s = 0.5
 
     # Create the strategy with a mocked stop method to avoid using AsyncMock directly
-    strategy = TimeBasedSegmentationStrategy(raw_queue, trans_queue, stop_event, config)
+    strategy = FixedSegmentationStrategy(raw_queue, trans_queue, stop_event, config)
 
     # Replace the stop method - we're not testing the parent stop method, just that it's called
     original_stop = strategy.stop
@@ -264,13 +264,13 @@ async def test_time_strategy_stop():
 
 
 @pytest.mark.asyncio
-async def test_time_strategy_respects_stop_event(time_strategy, stop_event):
-    """Test time strategy stops when stop event is set."""
+async def test_fixed_strategy_respects_stop_event(fixed_strategy, stop_event):
+    """Test fixed strategy stops when stop event is set."""
     # Start processing in background
-    process_task = asyncio.create_task(time_strategy.process())
+    process_task = asyncio.create_task(fixed_strategy.process())
 
     # Set active mode
-    await time_strategy.set_active_output_mode(CliOutputMode.KEYBOARD)
+    await fixed_strategy.set_active_output_mode(CliOutputMode.KEYBOARD)
 
     # Wait briefly
     await asyncio.sleep(0.01)
