@@ -149,16 +149,20 @@ class VADSegmentationStrategy(SegmentationStrategy):
         self._current_segment: List[np.ndarray] = []
 
         # Calculate pre-roll buffer size in frames
-        pre_roll_samples = int(
-            self.vad_config.pre_roll_duration_ms * SAMPLE_RATE / 1000
-        )
-        pre_roll_frames = pre_roll_samples // FRAME_SIZE
+        frame_duration_ms = (FRAME_SIZE / SAMPLE_RATE) * 1000
+        pre_roll_frames = max(1, round(self.vad_config.pre_roll_duration_ms / frame_duration_ms))
         self._pre_roll_buffer: Deque[np.ndarray] = collections.deque(
             maxlen=pre_roll_frames
         )
 
+        # VAD buffer for context
+        self._vad_buffer_size_frames = max(1, round(self.vad_config.vad_buffer_duration_ms / frame_duration_ms))
+        self._vad_buffer: List[np.ndarray] = []
+
+
         logger.info(
-            f"Initialized VAD-based segmentation (Threshold: {self.vad_config.threshold}, "
+            f"Initialized VAD-based segmentation (Buffer: {self.vad_config.vad_buffer_duration_ms}ms, "
+            f"Threshold: {self.vad_config.threshold}, "
             f"Min Speech: {self.vad_config.min_speech_duration_ms}ms, "
             f"Min Silence: {self.vad_config.min_silence_duration_ms}ms, "
             f"Pre-roll: {self.vad_config.pre_roll_duration_ms}ms, "
@@ -174,6 +178,7 @@ class VADSegmentationStrategy(SegmentationStrategy):
         self._silence_start_time = 0
         self._current_segment = []
         self._pre_roll_buffer.clear()
+        self._vad_buffer = []
 
         # Create processing task
         self._processing_task = asyncio.current_task()
@@ -181,46 +186,50 @@ class VADSegmentationStrategy(SegmentationStrategy):
         try:
             while not self.stop_event.is_set():
                 try:
-                    # Try to get and process new data (with timeout to check stop event)
-                    try:
-                        raw_frame = await asyncio.wait_for(
-                            self.raw_audio_queue.get(), timeout=0.5
-                        )
-                    except asyncio.TimeoutError:
-                        continue
+                    raw_frame = await asyncio.wait_for(
+                        self.raw_audio_queue.get(), timeout=0.5
+                    )
+                    self.raw_audio_queue.task_done()
+                except asyncio.TimeoutError:
+                    continue
 
-                    # Add frame to pre-roll buffer (regardless of active mode)
-                    self._pre_roll_buffer.append(raw_frame)
+                # This block processes one frame.
+                self._pre_roll_buffer.append(raw_frame)
 
-                    # Only proceed with VAD if we have an active output mode
-                    if self._active_mode is None:
-                        self.raw_audio_queue.task_done()
-                        continue
+                if self._active_mode is None:
+                    continue
+                
+                self._vad_buffer.append(raw_frame)
 
-                    # Run VAD model inference (in a thread to avoid blocking)
-                    try:
-                        speech_prob = await asyncio.to_thread(
-                            self.vad_model, raw_frame, FRAME_SIZE
-                        )
-                        is_speech_prob_high = speech_prob >= self.vad_config.threshold
-                        # Use neg_threshold if defined, otherwise just invert the main threshold check
-                        is_speech_prob_low = speech_prob <= (
-                            self.vad_config.neg_threshold
-                            if self.vad_config.neg_threshold is not None
-                            else self.vad_config.threshold
-                        )
-                    except Exception as e:
-                        logger.warning(f"Error in VAD inference: {e}")
-                        # Treat as silent on error
-                        is_speech_prob_high = False
-                        is_speech_prob_low = True
+                if len(self._vad_buffer) < self._vad_buffer_size_frames:
+                    continue
+                
+                # --- Batch Processing Logic ---
+                processing_frames = self._vad_buffer
+                self._vad_buffer = []
+
+                vad_chunk = np.concatenate(processing_frames)
+
+                try:
+                    speech_probs = await asyncio.to_thread(self.vad_model, vad_chunk)
+                except Exception as e:
+                    logger.warning(f"Error in VAD inference: {e}")
+                    continue
+                
+                for speech_prob, frame_for_prob in zip(speech_probs, processing_frames):
+                    is_speech_prob_high = speech_prob >= self.vad_config.threshold
+                    is_speech_prob_low = speech_prob <= (
+                        self.vad_config.neg_threshold
+                        if self.vad_config.neg_threshold is not None
+                        else self.vad_config.threshold
+                    )
 
                     # Process audio based on current state
                     if self._vad_state == VADState.SILENT:
                         if is_speech_prob_high:
                             # Transition to SPEECH state
                             logger.debug(
-                                f"VAD: SILENT -> SPEECH (speech_prob={speech_prob})"
+                                f"VAD: SILENT -> SPEECH (speech_prob={speech_prob:.2f})"
                             )
                             self._vad_state = VADState.SPEECH
 
@@ -233,7 +242,7 @@ class VADSegmentationStrategy(SegmentationStrategy):
 
                     elif self._vad_state == VADState.SPEECH:
                         # Add current frame to segment
-                        self._current_segment.append(raw_frame)
+                        self._current_segment.append(frame_for_prob)
 
                         # Check if max speech duration exceeded
                         if self.vad_config.max_speech_duration_s > 0:
@@ -254,19 +263,19 @@ class VADSegmentationStrategy(SegmentationStrategy):
                         if is_speech_prob_low:
                             # Start timing silence
                             logger.debug(
-                                f"VAD: SPEECH -> ENDING_SPEECH (speech_prob={speech_prob})"
+                                f"VAD: SPEECH -> ENDING_SPEECH (speech_prob={speech_prob:.2f})"
                             )
                             self._vad_state = VADState.ENDING_SPEECH
                             self._silence_start_time = time.monotonic()
 
                     elif self._vad_state == VADState.ENDING_SPEECH:
                         # Always add frame to current segment in ENDING_SPEECH state
-                        self._current_segment.append(raw_frame)
+                        self._current_segment.append(frame_for_prob)
 
                         if is_speech_prob_high:
                             # Resume speech, go back to SPEECH state
                             logger.debug(
-                                f"VAD: ENDING_SPEECH -> SPEECH (speech_prob={speech_prob})"
+                                f"VAD: ENDING_SPEECH -> SPEECH (speech_prob={speech_prob:.2f})"
                             )
                             self._vad_state = VADState.SPEECH
                             self._silence_start_time = 0
@@ -285,25 +294,22 @@ class VADSegmentationStrategy(SegmentationStrategy):
                                 await self._finalize_segment()
                                 self._vad_state = VADState.SILENT
 
-                    # Mark raw frame as processed
-                    self.raw_audio_queue.task_done()
-
-                except asyncio.CancelledError:
-                    logger.info("VAD segmentation processor cancelled")
-                    # Finalize any pending segment before exiting
-                    if self._current_segment:
-                        await self._finalize_segment()
-                    break
-
-                except Exception as e:
-                    logger.exception(f"Error in VAD segmentation processor: {e}")
-                    # Avoid tight loop on error
-                    await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            logger.info("VAD segmentation processor cancelled")
+            # Finalize any pending segment before exiting
+            if self._current_segment:
+                await self._finalize_segment()
+        
+        except Exception as e:
+            logger.exception(f"Error in VAD segmentation processor: {e}")
+            # Avoid tight loop on error
+            await asyncio.sleep(0.5)
 
         finally:
             # Clear for memory cleanup
             self._current_segment = []
             self._pre_roll_buffer.clear()
+            self._vad_buffer = []
             logger.info("VAD segmentation processor stopped")
 
     async def _finalize_segment(self) -> None:

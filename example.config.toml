@@ -46,6 +46,10 @@ min_silence_duration_ms = 1024
 # Pre-roll duration (ms) to include before a detected speech segment.
 pre_roll_duration_ms = 192
 
+# Duration (ms) of audio to buffer for VAD context. A larger value improves
+# accuracy at the cost of latency. 256ms is a good starting point.
+vad_buffer_duration_ms = 256
+
 # Optional negative threshold (must be between 0.0 and 1.0)
 # neg_threshold = 0.1
 

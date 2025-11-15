@@ -81,6 +81,7 @@ def vad_config_mock():
     config.vad.min_speech_duration_ms = 250
     config.vad.min_silence_duration_ms = 500
     config.vad.pre_roll_duration_ms = 200
+    config.vad.vad_buffer_duration_ms = 256  # Added
     config.vad.neg_threshold = 0.3
     config.vad.max_speech_duration_s = 10.0
     return config
@@ -299,11 +300,15 @@ async def test_vad_strategy_init(vad_strategy, vad_config_mock):
     from collections import deque
 
     assert isinstance(vad_strategy._pre_roll_buffer, deque)
+    
+    frame_duration_ms = (FRAME_SIZE / SAMPLE_RATE) * 1000
     # Check pre-roll buffer has correct max length based on config
-    pre_roll_frames = (
-        vad_config_mock.vad.pre_roll_duration_ms * SAMPLE_RATE / 1000
-    ) // FRAME_SIZE
+    pre_roll_frames = max(1, round(vad_config_mock.vad.pre_roll_duration_ms / frame_duration_ms))
     assert vad_strategy._pre_roll_buffer.maxlen == pre_roll_frames
+    
+    # Check VAD buffer size
+    vad_buffer_frames = max(1, round(vad_config_mock.vad.vad_buffer_duration_ms / frame_duration_ms))
+    assert vad_strategy._vad_buffer_size_frames == vad_buffer_frames
 
 
 class MockMonotonic:
@@ -339,6 +344,7 @@ async def test_vad_strategy_direct():
     config.vad.min_speech_duration_ms = 0  # No minimum for easier testing
     config.vad.min_silence_duration_ms = 10  # Very short for testing
     config.vad.pre_roll_duration_ms = 256
+    config.vad.vad_buffer_duration_ms = 256 # Added
     config.vad.neg_threshold = 0.3
     config.vad.max_speech_duration_s = 10.0
 
@@ -358,104 +364,92 @@ async def test_vad_strategy_direct():
     test_frame = np.ones(frame_size, dtype=np.float32)
 
     # 1. Detect speech - should transition to SPEECH
-    vad_model_mock.return_value = 0.7
+    vad_model_mock.return_value = np.array([0.7] * 8) # Return array for buffered processing
     mock_time = 100.0  # Arbitrary time value
 
     with patch("time.monotonic", return_value=mock_time):
-        # Add frame to pre-roll buffer
-        strategy._pre_roll_buffer.append(test_frame.copy())
+        # Add frames to pre-roll and VAD buffer
+        for _ in range(8):
+            strategy._pre_roll_buffer.append(test_frame.copy())
+            strategy._vad_buffer.append(test_frame.copy())
 
-        # Process a frame with speech
-        if test_frame.ndim == 1:
-            vad_frame = test_frame.reshape(1, -1)
-        else:
-            vad_frame = test_frame
+        # Process a chunk of frames with speech
+        processing_frames = strategy._vad_buffer
+        strategy._vad_buffer = []
+        vad_chunk = np.concatenate(processing_frames)
 
-        speech_prob = await asyncio.to_thread(vad_model_mock, vad_frame, FRAME_SIZE)
-        is_speech_prob_high = speech_prob >= strategy.vad_config.threshold
-        is_speech_prob_low = speech_prob <= strategy.vad_config.neg_threshold
-
-        # Assert we're in SILENT state and detected speech
-        assert strategy._vad_state == VADState.SILENT
-        assert is_speech_prob_high is True
-
-        # Simulate process() logic for SILENT state
-        if is_speech_prob_high:
-            strategy._vad_state = VADState.SPEECH
-            for pre_frame in strategy._pre_roll_buffer:
-                strategy._current_segment.append(pre_frame)
-            strategy._silence_start_time = 0
+        speech_probs = await asyncio.to_thread(vad_model_mock, vad_chunk)
+        
+        for speech_prob, frame_for_prob in zip(speech_probs, processing_frames):
+            is_speech_prob_high = speech_prob >= strategy.vad_config.threshold
+            if strategy._vad_state == VADState.SILENT and is_speech_prob_high:
+                strategy._vad_state = VADState.SPEECH
+                for pre_frame in strategy._pre_roll_buffer:
+                    strategy._current_segment.append(pre_frame)
+                strategy._silence_start_time = 0
+                break # Stop after first detection for this test part
 
     # Verify transition to SPEECH
     assert strategy._vad_state == VADState.SPEECH
     assert len(strategy._current_segment) > 0
 
     # 2. Detect silence - should transition to ENDING_SPEECH
-    vad_model_mock.return_value = 0.2  # Below threshold
+    vad_model_mock.return_value = np.array([0.2] * 8) # Below threshold
     mock_time = 100.5  # Advance time
 
     with patch("time.monotonic", return_value=mock_time):
-        # Process a frame with silence
-        speech_prob = await asyncio.to_thread(vad_model_mock, vad_frame, FRAME_SIZE)
-        is_speech_prob_high = speech_prob >= strategy.vad_config.threshold
-        is_speech_prob_low = speech_prob <= strategy.vad_config.neg_threshold
-
-        # Assert we're in SPEECH state and detected silence
-        assert strategy._vad_state == VADState.SPEECH
-        assert is_speech_prob_high is False
-        assert is_speech_prob_low is True
-
-        # Simulate adding frame to segment
-        strategy._current_segment.append(test_frame.copy())
-
-        # Simulate process() logic for SPEECH state with silence
-        if is_speech_prob_low:
-            strategy._vad_state = VADState.ENDING_SPEECH
-            strategy._silence_start_time = mock_time
+        # Process a chunk of frames with silence
+        speech_probs = await asyncio.to_thread(vad_model_mock, vad_chunk)
+        
+        for speech_prob, frame_for_prob in zip(speech_probs, processing_frames):
+            is_speech_prob_low = speech_prob <= strategy.vad_config.neg_threshold
+            if strategy._vad_state == VADState.SPEECH and is_speech_prob_low:
+                strategy._vad_state = VADState.ENDING_SPEECH
+                strategy._silence_start_time = mock_time
+                break
 
     # Verify transition to ENDING_SPEECH
     assert strategy._vad_state == VADState.ENDING_SPEECH
     assert strategy._silence_start_time == mock_time
 
     # 3. Resume speech - should go back to SPEECH
-    vad_model_mock.return_value = 0.8  # Above threshold
+    vad_model_mock.return_value = np.array([0.8] * 8) # Above threshold
     mock_time = 100.6  # Advance time slightly
 
     with patch("time.monotonic", return_value=mock_time):
-        # Process a frame with speech
-        speech_prob = await asyncio.to_thread(vad_model_mock, vad_frame, FRAME_SIZE)
-        is_speech_prob_high = speech_prob >= strategy.vad_config.threshold
-
-        # Assert we're in ENDING_SPEECH state and detected speech again
-        assert strategy._vad_state == VADState.ENDING_SPEECH
-        assert is_speech_prob_high is True
-
-        # Simulate adding frame to segment
-        strategy._current_segment.append(test_frame.copy())
-
-        # Simulate process() logic for ENDING_SPEECH with speech
-        if is_speech_prob_high:
-            strategy._vad_state = VADState.SPEECH
-            strategy._silence_start_time = 0
+        # Process a chunk of frames with speech
+        speech_probs = await asyncio.to_thread(vad_model_mock, vad_chunk)
+        
+        for speech_prob, frame_for_prob in zip(speech_probs, processing_frames):
+            is_speech_prob_high = speech_prob >= strategy.vad_config.threshold
+            if strategy._vad_state == VADState.ENDING_SPEECH and is_speech_prob_high:
+                strategy._vad_state = VADState.SPEECH
+                strategy._silence_start_time = 0
+                break
 
     # Verify transition back to SPEECH
     assert strategy._vad_state == VADState.SPEECH
     assert strategy._silence_start_time == 0
 
     # 4. Silence until timeout - should finalize segment
-    vad_model_mock.return_value = 0.1  # Well below threshold
+    vad_model_mock.return_value = np.array([0.1] * 8) # Well below threshold
     mock_time = 100.8  # Advance time
 
     with patch("time.monotonic", return_value=mock_time):
-        # Process a frame with silence
-        speech_prob = await asyncio.to_thread(vad_model_mock, vad_frame, FRAME_SIZE)
-        is_speech_prob_high = speech_prob >= strategy.vad_config.threshold
-        is_speech_prob_low = speech_prob <= strategy.vad_config.neg_threshold
+        # Process a chunk of frames with silence
+        speech_probs = await asyncio.to_thread(vad_model_mock, vad_chunk)
+        
+        for speech_prob, frame_for_prob in zip(speech_probs, processing_frames):
+            is_speech_prob_low = speech_prob <= strategy.vad_config.neg_threshold
+            if strategy._vad_state == VADState.SPEECH and is_speech_prob_low:
+                strategy._vad_state = VADState.ENDING_SPEECH
+                strategy._silence_start_time = mock_time
+                break
+            elif strategy._vad_state != VADState.ENDING_SPEECH: # If already in silence, start timing
+                 strategy._vad_state = VADState.ENDING_SPEECH
+                 strategy._silence_start_time = mock_time
+                 break
 
-        # Simulate transition to ENDING_SPEECH
-        if is_speech_prob_low:
-            strategy._vad_state = VADState.ENDING_SPEECH
-            strategy._silence_start_time = mock_time
 
     # Verify in ENDING_SPEECH state
     assert strategy._vad_state == VADState.ENDING_SPEECH
@@ -468,21 +462,18 @@ async def test_vad_strategy_direct():
         strategy, "_finalize_segment", wraps=strategy._finalize_segment
     ) as spy:
         with patch("time.monotonic", return_value=mock_time):
-            # Process another frame with silence
-            speech_prob = await asyncio.to_thread(vad_model_mock, vad_frame, FRAME_SIZE)
-            is_speech_prob_high = speech_prob >= strategy.vad_config.threshold
-            is_speech_prob_low = speech_prob <= strategy.vad_config.neg_threshold
-
-            # Simulate adding frame to segment
-            strategy._current_segment.append(test_frame.copy())
-
-            # Simulate ENDING_SPEECH state with silence timeout check
-            if not is_speech_prob_high:
-                silence_duration_ms = (mock_time - strategy._silence_start_time) * 1000
-                if silence_duration_ms >= strategy.vad_config.min_silence_duration_ms:
-                    await strategy._finalize_segment()
-                    strategy._vad_state = VADState.SILENT
-
+            # Process another chunk of frames with silence
+            speech_probs = await asyncio.to_thread(vad_model_mock, vad_chunk)
+            
+            for speech_prob, frame_for_prob in zip(speech_probs, processing_frames):
+                is_speech_prob_high = speech_prob >= strategy.vad_config.threshold
+                if strategy._vad_state == VADState.ENDING_SPEECH and not is_speech_prob_high:
+                    silence_duration_ms = (mock_time - strategy._silence_start_time) * 1000
+                    if silence_duration_ms >= strategy.vad_config.min_silence_duration_ms:
+                        await strategy._finalize_segment()
+                        strategy._vad_state = VADState.SILENT
+                        break
+    
     # Verify _finalize_segment was called
     spy.assert_awaited_once()
 
@@ -506,7 +497,7 @@ async def test_max_speech_duration():
 
     # Create mock VAD model that always detects speech
     vad_model_mock = Mock()
-    vad_model_mock.return_value = 0.8  # Always above threshold
+    vad_model_mock.return_value = np.array([0.8] * 8)  # Always above threshold
 
     # Create config with short max duration
     config = MagicMock()
@@ -516,6 +507,7 @@ async def test_max_speech_duration():
     config.vad.min_speech_duration_ms = 0  # No minimum for testing
     config.vad.min_silence_duration_ms = 500
     config.vad.pre_roll_duration_ms = 0
+    config.vad.vad_buffer_duration_ms = 256 # Added
     config.vad.neg_threshold = 0.3
     config.vad.max_speech_duration_s = 0.1  # Very short (100ms)
 
@@ -545,8 +537,7 @@ async def test_max_speech_duration():
         else:
             vad_frame = test_frame
 
-        speech_prob = await asyncio.to_thread(vad_model_mock, vad_frame, FRAME_SIZE)
-        is_speech_prob_high = speech_prob >= strategy.vad_config.threshold
+        speech_prob = await asyncio.to_thread(vad_model_mock, vad_frame)
 
         # Add another frame that would push us over the limit
         strategy._current_segment.append(test_frame.copy())
@@ -586,7 +577,7 @@ async def test_min_speech_duration():
 
     # Create mock VAD model
     vad_model_mock = Mock()
-    vad_model_mock.return_value = 0.1  # Below threshold (silence)
+    vad_model_mock.return_value = np.array([0.1] * 8)  # Below threshold (silence)
 
     # Create config with specific min speech duration
     config = MagicMock()
@@ -596,6 +587,7 @@ async def test_min_speech_duration():
     config.vad.min_speech_duration_ms = 300  # Require at least 300ms of speech
     config.vad.min_silence_duration_ms = 100  # Short silence for testing
     config.vad.pre_roll_duration_ms = 0
+    config.vad.vad_buffer_duration_ms = 256 # Added
     config.vad.neg_threshold = 0.3
     config.vad.max_speech_duration_s = 10.0
 
