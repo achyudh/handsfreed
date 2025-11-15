@@ -117,13 +117,9 @@ def test_load_config_invalid_toml(tmp_path):
 def test_audio_config_validation():
     """Test Audio configuration validation."""
     with pytest.raises(ValueError, match="greater than 0"):
-        AppConfig(
-            **{**VALID_CONFIG, "audio": {"input_gain": 0.0}}
-        )
+        AppConfig(**{**VALID_CONFIG, "audio": {"input_gain": 0.0}})
     with pytest.raises(ValueError, match="greater than or equal to 0"):
-        AppConfig(
-            **{**VALID_CONFIG, "audio": {"dc_offset_window_ms": -1}}
-        )
+        AppConfig(**{**VALID_CONFIG, "audio": {"dc_offset_window_ms": -1}})
 
 
 def test_vad_config_validation():

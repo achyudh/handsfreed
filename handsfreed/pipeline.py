@@ -144,5 +144,3 @@ class AbstractPipelineProducerComponent(AbstractPipelineComponent):
     async def _produce_item(self) -> Any:
         """Produce a single item to be placed on the output queue."""
         raise NotImplementedError
-
-

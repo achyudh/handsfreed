@@ -51,9 +51,7 @@ class FixedSegmentationStrategy(SegmentationStrategy):
         # Process buffer if enough data for a chunk
         while len(self._buffer) >= self.chunk_size_frames:
             # Extract chunk
-            chunk = self._buffer[: self.chunk_size_frames].astype(
-                AUDIO_DTYPE
-            )
+            chunk = self._buffer[: self.chunk_size_frames].astype(AUDIO_DTYPE)
 
             # Remove chunk from buffer (non-overlapping)
             self._buffer = self._buffer[self.chunk_size_frames :]
@@ -65,9 +63,7 @@ class FixedSegmentationStrategy(SegmentationStrategy):
                     f"({len(chunk) / SAMPLE_RATE:.1f}s)"
                 )
                 # Create and send task
-                task = TranscriptionTask(
-                    audio=chunk, output_mode=self._active_mode
-                )
+                task = TranscriptionTask(audio=chunk, output_mode=self._active_mode)
                 await self.output_queue.put(task)
             else:
                 logger.debug("Discarding chunk (no active output mode)")

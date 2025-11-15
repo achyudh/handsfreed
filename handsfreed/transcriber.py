@@ -140,9 +140,7 @@ class Transcriber(AbstractPipelineConsumerComponent):
             return
 
         # Run transcription in thread pool
-        result, error = await asyncio.to_thread(
-            self._run_transcription, task.audio
-        )
+        result, error = await asyncio.to_thread(self._run_transcription, task.audio)
 
         if error:
             logger.error(f"Transcription error: {error}")
@@ -154,9 +152,7 @@ class Transcriber(AbstractPipelineConsumerComponent):
                 f"for {task.output_mode.value}: {result.text[:100]}..."
             )
             if result.language_probability is not None:
-                logger.debug(
-                    f"Language probability: {result.language_probability:.2f}"
-                )
+                logger.debug(f"Language probability: {result.language_probability:.2f}")
 
             # Put transcription and output mode on output queue
             if self.output_queue:

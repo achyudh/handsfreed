@@ -112,6 +112,7 @@ async def test_stream_error_handling(audio_capture):
         assert audio_capture._stream is None
         assert audio_capture._task is None
 
+
 @pytest.mark.asyncio
 async def test_gain_control(audio_capture, mock_stream, raw_audio_queue):
     """Test input gain control."""
@@ -125,12 +126,12 @@ async def test_gain_control(audio_capture, mock_stream, raw_audio_queue):
         # Create a sine wave with amplitude 0.5
         t = np.linspace(0, FRAME_SIZE / 16000, FRAME_SIZE, endpoint=False)
         test_data = 0.5 * np.sin(2 * np.pi * 440 * t).astype(AUDIO_DTYPE)
-        
+
         await simulate_audio_data(audio_capture, test_data)
 
         # Get processed frame
         frame = await asyncio.wait_for(raw_audio_queue.get(), timeout=1.0)
-        
+
         # The peak of the sine wave should be doubled from 0.5 to 1.0
         assert np.allclose(np.max(frame), 1.0, atol=1e-6)
 
@@ -151,7 +152,7 @@ async def test_dc_offset_correction(audio_capture, mock_stream, raw_audio_queue)
 
         # Get processed frame
         frame = await asyncio.wait_for(raw_audio_queue.get(), timeout=1.0)
-        
+
         # The running average will not be perfect on the first frame, but it should be close
         # For a single frame, the offset removed will be the mean of that frame.
         assert np.allclose(frame.mean(), 0, atol=1e-6)

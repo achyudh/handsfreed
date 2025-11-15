@@ -53,9 +53,12 @@ class AudioCapture(AbstractPipelineProducerComponent):
 
         # Buffer for running DC offset calculation
         frame_duration_ms = (FRAME_SIZE / SAMPLE_RATE) * 1000
-        dc_offset_buffer_maxlen = max(1, round(self.audio_config.dc_offset_window_ms / frame_duration_ms))
-        self._dc_offset_buffer: collections.deque = collections.deque(maxlen=dc_offset_buffer_maxlen)
-
+        dc_offset_buffer_maxlen = max(
+            1, round(self.audio_config.dc_offset_window_ms / frame_duration_ms)
+        )
+        self._dc_offset_buffer: collections.deque = collections.deque(
+            maxlen=dc_offset_buffer_maxlen
+        )
 
     def _audio_callback(
         self,
@@ -98,7 +101,9 @@ class AudioCapture(AbstractPipelineProducerComponent):
     async def _produce_item(self) -> Optional[np.ndarray]:
         """Get a raw audio frame from the thread-safe queue."""
         try:
-            return await asyncio.to_thread(self._raw_thread_q.get, timeout=QUEUE_GET_TIMEOUT)
+            return await asyncio.to_thread(
+                self._raw_thread_q.get, timeout=QUEUE_GET_TIMEOUT
+            )
         except queue.Empty:
             return None
 

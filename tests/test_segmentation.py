@@ -227,6 +227,7 @@ async def test_fixed_strategy_stop():
     # Check that the processing task is no longer running
     assert strategy._task is None or strategy._task.done()
 
+
 @pytest.mark.asyncio
 async def test_fixed_strategy_respects_stop_event(fixed_strategy, stop_event):
     """Test fixed strategy stops when stop event is set."""
@@ -250,6 +251,7 @@ async def test_fixed_strategy_respects_stop_event(fixed_strategy, stop_event):
 
     # Task should be done
     assert fixed_strategy._task.done()
+
 
 @pytest.mark.asyncio
 async def test_vad_strategy_init(vad_strategy, vad_config_mock):

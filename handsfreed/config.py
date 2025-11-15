@@ -57,9 +57,7 @@ def get_default_log_path() -> Path:
 class AudioConfig(BaseModel):
     """Audio processing configuration."""
 
-    input_gain: float = Field(
-        default=1.0, gt=0, description="Input gain multiplier."
-    )
+    input_gain: float = Field(default=1.0, gt=0, description="Input gain multiplier.")
     dc_offset_correction: bool = Field(
         default=True, description="Enable DC offset correction on raw audio."
     )
@@ -75,7 +73,11 @@ class VadConfig(BaseModel):
     threshold: float = 0.5
     min_speech_duration_ms: int = Field(default=256, ge=1)
     min_silence_duration_ms: int = Field(default=1024, ge=1)
-    pre_roll_duration_ms: int = Field(default=192, ge=0, description="Pre-roll duration (ms) to include before a detected speech segment.")
+    pre_roll_duration_ms: int = Field(
+        default=192,
+        ge=0,
+        description="Pre-roll duration (ms) to include before a detected speech segment.",
+    )
     neg_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     max_speech_duration_s: float = Field(default=0.0, ge=0)
 

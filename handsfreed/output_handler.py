@@ -159,7 +159,12 @@ async def execute_output_command(
 class OutputHandler(AbstractPipelineConsumerComponent):
     """Handles output execution for transcribed text."""
 
-    def __init__(self, config: OutputConfig, output_queue: asyncio.Queue, stop_event: asyncio.Event):
+    def __init__(
+        self,
+        config: OutputConfig,
+        output_queue: asyncio.Queue,
+        stop_event: asyncio.Event,
+    ):
         """Initialize output handler.
 
         Args:

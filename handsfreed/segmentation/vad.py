@@ -82,9 +82,7 @@ class VADSegmentationStrategy(SegmentationStrategy):
 
         # Run VAD model inference (in a thread to avoid blocking)
         try:
-            speech_prob = await asyncio.to_thread(
-                self.vad_model, raw_frame, FRAME_SIZE
-            )
+            speech_prob = await asyncio.to_thread(self.vad_model, raw_frame, FRAME_SIZE)
             is_speech_prob_high = speech_prob >= self.vad_config.threshold
             # Use neg_threshold if defined, otherwise just invert the main threshold check
             is_speech_prob_low = speech_prob <= (
@@ -102,9 +100,7 @@ class VADSegmentationStrategy(SegmentationStrategy):
         if self._vad_state == VADState.SILENT:
             if is_speech_prob_high:
                 # Transition to SPEECH state
-                logger.debug(
-                    f"VAD: SILENT -> SPEECH (speech_prob={speech_prob})"
-                )
+                logger.debug(f"VAD: SILENT -> SPEECH (speech_prob={speech_prob})")
                 self._vad_state = VADState.SPEECH
 
                 # Add pre-roll buffer content to current segment
@@ -123,10 +119,7 @@ class VADSegmentationStrategy(SegmentationStrategy):
                 current_duration_s = (
                     sum(len(f) for f in self._current_segment) / SAMPLE_RATE
                 )
-                if (
-                    current_duration_s
-                    >= self.vad_config.max_speech_duration_s
-                ):
+                if current_duration_s >= self.vad_config.max_speech_duration_s:
                     logger.debug(
                         f"VAD: Max speech duration reached ({current_duration_s:.1f}s)"
                     )
@@ -158,10 +151,7 @@ class VADSegmentationStrategy(SegmentationStrategy):
                 silence_duration_ms = (
                     time.monotonic() - self._silence_start_time
                 ) * 1000
-                if (
-                    silence_duration_ms
-                    >= self.vad_config.min_silence_duration_ms
-                ):
+                if silence_duration_ms >= self.vad_config.min_silence_duration_ms:
                     logger.debug(
                         f"VAD: ENDING_SPEECH -> SILENT (silence={silence_duration_ms:.0f}ms)"
                     )
