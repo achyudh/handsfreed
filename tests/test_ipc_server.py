@@ -31,29 +31,12 @@ def shutdown_event():
 
 
 @pytest.fixture
-def audio_capture():
-    """Create a mock audio capture instance."""
-    capture = AsyncMock()
-    capture.start = AsyncMock()
-    capture.stop = AsyncMock()
-    return capture
-
-
-@pytest.fixture
-def segmentation_strategy():
-    """Create a mock segmentation strategy."""
-    strategy = AsyncMock()
-    strategy.set_active_output_mode = AsyncMock()
-    strategy.stop = AsyncMock()
-    return strategy
-
-
-@pytest.fixture
-def output_handler():
-    """Create a mock output handler instance."""
-    handler = AsyncMock()
-    handler.reset_spacing_state = Mock()  # Regular method, not async
-    return handler
+def pipeline_manager():
+    """Create a mock pipeline manager instance."""
+    manager = AsyncMock()
+    manager.start_transcription = AsyncMock()
+    manager.stop_transcription = AsyncMock()
+    return manager
 
 
 @pytest_asyncio.fixture
@@ -61,18 +44,14 @@ async def ipc_server(
     socket_path,
     state_manager,
     shutdown_event,
-    segmentation_strategy,
-    audio_capture,
-    output_handler,
+    pipeline_manager,
 ):
     """Create an IPC server instance."""
     server = IPCServer(
         socket_path,
         state_manager,
         shutdown_event,
-        segmentation_strategy,
-        audio_capture,
-        output_handler,
+        pipeline_manager,
     )
     try:
         yield server
@@ -130,7 +109,7 @@ async def test_server_existing_socket(ipc_server, socket_path):
 
 @pytest.mark.asyncio
 async def test_start_command_success(
-    ipc_server, socket_path, state_manager, segmentation_strategy, audio_capture
+    ipc_server, socket_path, state_manager, pipeline_manager
 ):
     """Test successful Start command."""
     await ipc_server.start()
@@ -143,9 +122,8 @@ async def test_start_command_success(
     # Check response
     assert response["response_type"] == "ack"
 
-    # Verify handlers were called in correct order
-    audio_capture.start.assert_awaited_once()
-    segmentation_strategy.set_active_output_mode.assert_awaited_once_with(
+    # Verify pipeline manager was called
+    pipeline_manager.start_transcription.assert_awaited_once_with(
         CliOutputMode.KEYBOARD
     )
 
@@ -154,12 +132,12 @@ async def test_start_command_success(
 
 
 @pytest.mark.asyncio
-async def test_start_command_audio_failure(
-    ipc_server, socket_path, state_manager, segmentation_strategy, audio_capture
+async def test_start_command_failure(
+    ipc_server, socket_path, state_manager, pipeline_manager
 ):
-    """Test Start command when audio capture fails."""
+    """Test Start command when pipeline manager fails."""
     await ipc_server.start()
-    audio_capture.start.side_effect = RuntimeError("Test error")
+    pipeline_manager.start_transcription.side_effect = RuntimeError("Test error")
 
     # Send Start command
     response = await send_command_get_response(
@@ -170,16 +148,13 @@ async def test_start_command_audio_failure(
     assert response["response_type"] == "error"
     assert "Failed to start" in response["message"]
 
-    # Check that segmentation strategy was not set
-    segmentation_strategy.set_active_output_mode.assert_not_awaited()
-
     # Check state
     assert state_manager.current_state == DaemonStateEnum.ERROR
 
 
 @pytest.mark.asyncio
 async def test_start_while_running(
-    ipc_server, socket_path, state_manager, segmentation_strategy, audio_capture
+    ipc_server, socket_path, state_manager, pipeline_manager
 ):
     """Test Start command while already running."""
     await ipc_server.start()
@@ -190,17 +165,14 @@ async def test_start_while_running(
         socket_path, {"command": "start", "output_mode": "clipboard"}
     )
 
-    # Should succeed but only change mode
+    # Should succeed and just call pipeline manager
     assert response["response_type"] == "ack"
-    segmentation_strategy.set_active_output_mode.assert_awaited_with(
-        CliOutputMode.CLIPBOARD
-    )
-    audio_capture.start.assert_not_awaited()  # Should not restart
+    pipeline_manager.start_transcription.assert_awaited_with(CliOutputMode.CLIPBOARD)
 
 
 @pytest.mark.asyncio
 async def test_stop_command_success(
-    ipc_server, socket_path, state_manager, segmentation_strategy, audio_capture
+    ipc_server, socket_path, state_manager, pipeline_manager
 ):
     """Test successful Stop command."""
     await ipc_server.start()
@@ -212,28 +184,24 @@ async def test_stop_command_success(
     # Check response
     assert response["response_type"] == "ack"
 
-    # Verify handlers were stopped in correct order
-    segmentation_strategy.set_active_output_mode.assert_awaited_with(None)
-    audio_capture.stop.assert_awaited_once()
+    # Verify pipeline manager was called
+    pipeline_manager.stop_transcription.assert_awaited_once()
 
     # Check state
     assert state_manager.current_state == DaemonStateEnum.IDLE
 
 
 @pytest.mark.asyncio
-async def test_stop_when_idle(
-    ipc_server, socket_path, segmentation_strategy, audio_capture
-):
+async def test_stop_when_idle(ipc_server, socket_path, pipeline_manager):
     """Test Stop command when already idle."""
     await ipc_server.start()
 
     # Send Stop command
     response = await send_command_get_response(socket_path, {"command": "stop"})
 
-    # Should succeed but do nothing
+    # Should succeed and call pipeline manager
     assert response["response_type"] == "ack"
-    segmentation_strategy.set_active_output_mode.assert_not_awaited()
-    audio_capture.stop.assert_not_awaited()
+    pipeline_manager.stop_transcription.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -249,48 +217,6 @@ async def test_status_command(ipc_server, socket_path, state_manager):
     assert response["response_type"] == "status"
     assert response["status"]["state"] == "Listening"
     assert response["status"]["last_error"] is None
-
-
-@pytest.mark.asyncio
-async def test_start_command_resets_spacing_state(
-    ipc_server, socket_path, segmentation_strategy, audio_capture, output_handler
-):
-    """Test Start command resets spacing state."""
-    await ipc_server.start()
-
-    # Send Start command
-    response = await send_command_get_response(
-        socket_path, {"command": "start", "output_mode": "keyboard"}
-    )
-
-    # Check response
-    assert response["response_type"] == "ack"
-
-    # Verify output_handler.reset_spacing_state was called
-    output_handler.reset_spacing_state.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_stop_command_resets_spacing_state(
-    ipc_server,
-    socket_path,
-    state_manager,
-    segmentation_strategy,
-    audio_capture,
-    output_handler,
-):
-    """Test Stop command resets spacing state."""
-    await ipc_server.start()
-    state_manager.set_state(DaemonStateEnum.LISTENING)
-
-    # Send Stop command
-    response = await send_command_get_response(socket_path, {"command": "stop"})
-
-    # Check response
-    assert response["response_type"] == "ack"
-
-    # Verify output_handler.reset_spacing_state was called
-    output_handler.reset_spacing_state.assert_called_once()
 
 
 @pytest.mark.asyncio

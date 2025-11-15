@@ -26,11 +26,7 @@ def mock_handlers():
 
     with (
         patch("handsfreed.main.IPCServer") as mock_ipc,
-        patch("handsfreed.main.AudioCapture") as mock_audio,
-        patch("handsfreed.main.Transcriber") as mock_trans,
-        patch("handsfreed.main.OutputHandler") as mock_output,
-        patch("handsfreed.main.FixedSegmentationStrategy") as mock_fixed_strategy,
-        patch("handsfreed.main.VADSegmentationStrategy") as mock_vad_strategy,
+        patch("handsfreed.main.PipelineManager") as mock_pm,
         patch("handsfreed.main.asyncio.Event") as mock_event,
     ):
         # Configure event mock to return our events
@@ -38,37 +34,17 @@ def mock_handlers():
 
         # Setup mocked instances
         ipc = AsyncMock()
-        audio = AsyncMock()
-        trans = AsyncMock()
-        output = AsyncMock()
-        fixed_strategy_instance = AsyncMock()
-        fixed_strategy_instance.process = AsyncMock(return_value=None)
-        vad_strategy_instance = AsyncMock()
-        vad_strategy_instance.process = AsyncMock(return_value=None)
-
+        pm = AsyncMock()
 
         # Configure mock constructors
         mock_ipc.return_value = ipc
-        mock_audio.return_value = audio
-        mock_trans.return_value = trans
-        mock_output.return_value = output
-        mock_fixed_strategy.return_value = fixed_strategy_instance
-        mock_vad_strategy.return_value = vad_strategy_instance
-
-        # Make transcriber.load_model return True (not async)
-        trans.load_model = MagicMock(return_value=True)
+        mock_pm.return_value = pm
 
         yield {
             "ipc": ipc,
-            "audio": audio,
-            "trans": trans,
-            "output": output,
-            "fixed_strategy": fixed_strategy_instance,
-            "vad_strategy": vad_strategy_instance,
+            "pm": pm,
             "shutdown_event": shutdown_event,
             "stop_event": stop_event,
-            "mock_fixed_strategy_class": mock_fixed_strategy,
-            "mock_vad_strategy_class": mock_vad_strategy,
         }
 
 
@@ -92,18 +68,13 @@ async def test_main_startup_shutdown(mock_config, mock_handlers):
         assert exit_code == 0
 
         # Verify startup sequence
-        mock_handlers["trans"].load_model.assert_called_once()
-        mock_handlers["trans"].start.assert_awaited_once()
-        mock_handlers["output"].start.assert_awaited_once()
-        mock_handlers["fixed_strategy"].start.assert_awaited_once()
+        mock_handlers["pm"].start.assert_awaited_once()
         mock_handlers["ipc"].start.assert_awaited_once()
 
         # Verify shutdown
         mock_handlers["ipc"].stop.assert_awaited_once()
         assert mock_handlers["stop_event"].is_set()
-        mock_handlers["fixed_strategy"].stop.assert_awaited_once()
-        mock_handlers["trans"].stop.assert_awaited_once()
-        mock_handlers["output"].stop.assert_awaited_once()
+        mock_handlers["pm"].stop.assert_awaited_once()
 
     except asyncio.TimeoutError:
         main_task.cancel()
@@ -117,33 +88,19 @@ async def test_main_startup_shutdown(mock_config, mock_handlers):
 
 
 @pytest.mark.asyncio
-async def test_main_model_load_failure(mock_config, mock_handlers):
-    """Test handling of Whisper model load failure."""
-    # Make model loading fail
-    mock_handlers["trans"].load_model.return_value = False
+async def test_main_pipeline_manager_start_failure(mock_config, mock_handlers):
+    """Test handling of PipelineManager start failure."""
+    # Make pipeline manager start fail
+    mock_handlers["pm"].start.side_effect = RuntimeError("Test error")
 
-    # Run main (should return immediately on model load failure)
+    # Run main (should return immediately on failure)
     exit_code = await main()
 
     # Check error exit
     assert exit_code == 1
 
-    # Verify nothing was started
+    # Verify nothing else was started
     mock_handlers["ipc"].start.assert_not_awaited()
-    mock_handlers["fixed_strategy"].start.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_main_transcriber_start_failure(mock_config, mock_handlers):
-    """Test handling of transcriber start failure."""
-    # Make transcriber start fail
-    mock_handlers["trans"].start.side_effect = RuntimeError("Test error")
-
-    # Run main (should return on transcriber start failure)
-    exit_code = await main()
-
-    # Check error exit
-    assert exit_code == 1
 
 
 @pytest.mark.asyncio
@@ -160,47 +117,5 @@ async def test_main_startup_error(mock_config, mock_handlers):
 
     # Verify cleanup attempted
     mock_handlers["stop_event"].is_set()
-    mock_handlers["fixed_strategy"].stop.assert_awaited_once()
-    mock_handlers["trans"].stop.assert_awaited_once()
-    mock_handlers["output"].stop.assert_awaited_once()
+    mock_handlers["pm"].stop.assert_awaited_once()
     mock_handlers["ipc"].stop.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_vad_strategy_selection(mock_config, mock_handlers):
-    """Test that VADSegmentationStrategy is selected when VAD is enabled."""
-    mock_config.vad.enabled = True
-    mock_config.vad.min_silence_duration_ms = 1000 # Ensure VAD config is valid
-
-    with patch("handsfreed.main.get_vad_model") as mock_get_vad_model:
-        mock_get_vad_model.return_value = Mock() # Mock a successful VAD model load
-
-        # Start main briefly
-        main_task = asyncio.create_task(main())
-        await asyncio.sleep(0.1)
-        mock_handlers["shutdown_event"].set()
-        await main_task
-
-        # Verify VADSegmentationStrategy was created
-        mock_handlers["mock_vad_strategy_class"].assert_called_once()
-        mock_handlers["vad_strategy"].start.assert_awaited_once()
-        mock_handlers["mock_fixed_strategy_class"].assert_not_called()
-        mock_get_vad_model.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_strategy_selection(mock_config, mock_handlers):
-    """Test that FixedSegmentationStrategy is selected by default."""
-    # Ensure VAD is disabled in config for this test
-    mock_config.vad.enabled = False
-
-    # Start main briefly
-    main_task = asyncio.create_task(main())
-    await asyncio.sleep(0.1)
-    mock_handlers["shutdown_event"].set()
-    await main_task
-
-    # Verify FixedSegmentationStrategy was created
-    mock_handlers["mock_fixed_strategy_class"].assert_called_once()
-    mock_handlers["fixed_strategy"].start.assert_awaited_once()
-    mock_handlers["mock_vad_strategy_class"].assert_not_called()

@@ -6,23 +6,11 @@ import signal
 import sys
 from typing import NoReturn
 
-from .audio_capture import AudioCapture
 from .config import load_config
 from .ipc_server import IPCServer
 from .logging_setup import setup_logging
-from .output_handler import OutputHandler
+from .pipeline_manager import PipelineManager
 from .state import DaemonStateManager
-from .segmentation.fixed import FixedSegmentationStrategy
-from .segmentation.vad import VADSegmentationStrategy
-from .transcriber import Transcriber
-
-# Import VAD model loader
-try:
-    from faster_whisper.vad import get_vad_model
-except ImportError as e:
-    logger = logging.getLogger(__name__)
-    logger.warning(f"Failed to import VAD model: {e}")
-    get_vad_model = None
 
 logger = logging.getLogger(__name__)
 
@@ -53,65 +41,23 @@ async def main() -> int:
     stop_event = asyncio.Event()
     shutdown_event = asyncio.Event()
 
-    # Create the processing queues
-    raw_audio_queue = asyncio.Queue()  # Raw audio frames from capture to strategy
-    transcription_queue = asyncio.Queue()  # Audio chunks from strategy to transcriber
-    output_queue = asyncio.Queue()  # Text + mode from transcriber to output
+    # Create pipeline manager
+    try:
+        pipeline_manager = PipelineManager(config, stop_event)
+        await pipeline_manager.start()
+    except Exception as e:
+        logger.exception(f"Failed to start pipeline manager: {e}")
+        return 1
 
-    # Create component instances (but don't start them yet)
-    audio_capture = AudioCapture(raw_audio_queue, config.audio, stop_event)
-    transcriber = Transcriber(config, transcription_queue, output_queue, stop_event)
-    output_handler = OutputHandler(config.output, output_queue, stop_event)
+    # Create IPC server
+    ipc_server = IPCServer(
+        config.daemon.computed_socket_path,
+        state_manager,
+        shutdown_event,
+        pipeline_manager,
+    )
 
     try:
-        # Load the Whisper model (can take a while)
-        if not transcriber.load_model():
-            logger.error("Failed to load Whisper model")
-            return 1
-
-        # Create segmentation strategy based on configuration
-        if config.vad.enabled and get_vad_model is not None:
-            try:
-                logger.info("Loading VAD model...")
-                vad_model = get_vad_model()
-                logger.info("Using VAD-based segmentation")
-                segmentation_strategy = VADSegmentationStrategy(
-                    raw_audio_queue, transcription_queue, stop_event, config, vad_model
-                )
-            except Exception as e:
-                logger.error(f"Failed to load VAD model: {e}")
-                logger.info("Falling back to fixed-duration segmentation")
-                segmentation_strategy = FixedSegmentationStrategy(
-                    raw_audio_queue, transcription_queue, stop_event, config
-                )
-        else:
-            if config.vad.enabled and get_vad_model is None:
-                logger.warning(
-                    "VAD is enabled in config, but VAD module could not be imported. "
-                    "Falling back to fixed-duration segmentation."
-                )
-            else:
-                logger.info("Using fixed-duration segmentation")
-
-            segmentation_strategy = FixedSegmentationStrategy(
-                raw_audio_queue, transcription_queue, stop_event, config
-            )
-
-        # Start pipeline components
-        await transcriber.start()
-        await output_handler.start()
-        await segmentation_strategy.start()
-
-        # Create IPC server with all components
-        ipc_server = IPCServer(
-            config.daemon.computed_socket_path,
-            state_manager,
-            shutdown_event,
-            segmentation_strategy,
-            audio_capture,
-            output_handler,
-        )
-
         # Setup signal handlers
         def handle_signal(sig: int) -> None:
             sig_name = signal.Signals(sig).name
@@ -136,11 +82,7 @@ async def main() -> int:
         # Stop in reverse order to avoid dangling tasks
         await ipc_server.stop()
         stop_event.set()  # Signal components to stop
-
-        # Stop components
-        await segmentation_strategy.stop()
-        await transcriber.stop()
-        await output_handler.stop()
+        await pipeline_manager.stop()
 
         return 0
 
@@ -148,14 +90,7 @@ async def main() -> int:
         logger.exception("Fatal error in daemon:")
         # Try to clean up if we can
         stop_event.set()
-
-        # Stop components
-        if "segmentation_strategy" in locals():
-            await segmentation_strategy.stop()
-        if "transcriber" in locals():
-            await transcriber.stop()
-        if "output_handler" in locals():
-            await output_handler.stop()
+        await pipeline_manager.stop()
         if "ipc_server" in locals():
             await ipc_server.stop()
 
