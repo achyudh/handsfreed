@@ -8,7 +8,7 @@ from typing import Optional, Set
 
 from pydantic import ValidationError
 
-from handsfreed.pipelines import SegmentationStrategy
+from handsfreed.segmentation.strategy import SegmentationStrategy
 
 from .audio_capture import AudioCapture
 from .ipc_models import (

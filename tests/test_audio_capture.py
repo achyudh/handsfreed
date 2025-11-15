@@ -27,15 +27,20 @@ def mock_stream():
     return stream
 
 
+@pytest.fixture
+def stop_event():
+    """Create a stop event."""
+    return asyncio.Event()
+
+
 @pytest_asyncio.fixture
-async def audio_capture(raw_audio_queue):
+async def audio_capture(raw_audio_queue, stop_event):
     """Create an audio capture instance."""
     audio_config = AudioConfig()
-    capture = AudioCapture(raw_audio_queue, audio_config)
+    capture = AudioCapture(raw_audio_queue, audio_config, stop_event)
     yield capture
-    # Cleanup if needed
-    if capture._stream is not None:
-        await capture.stop()
+    # Always call stop to ensure the processing task is cleaned up.
+    await capture.stop()
 
 
 async def simulate_audio_data(capture, data: np.ndarray) -> None:
@@ -58,7 +63,7 @@ async def test_start_success(audio_capture, mock_stream):
         await audio_capture.start()
 
         assert audio_capture._stream is not None
-        assert audio_capture._processing_task is not None
+        assert audio_capture._task is not None
         mock_stream.start.assert_called_once()
 
 
@@ -70,7 +75,7 @@ async def test_stop_success(audio_capture, mock_stream):
         await audio_capture.stop()
 
         assert audio_capture._stream is None
-        assert audio_capture._processing_task is None
+        assert audio_capture._task is None
         mock_stream.stop.assert_called_once()
         mock_stream.close.assert_called_once()
 
@@ -105,8 +110,7 @@ async def test_stream_error_handling(audio_capture):
             await audio_capture.start()
 
         assert audio_capture._stream is None
-        assert audio_capture._processing_task is None
-
+        assert audio_capture._task is None
 
 @pytest.mark.asyncio
 async def test_gain_control(audio_capture, mock_stream, raw_audio_queue):

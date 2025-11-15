@@ -6,7 +6,8 @@ import logging
 import numpy as np
 
 from ..audio_capture import AUDIO_DTYPE, SAMPLE_RATE
-from ..pipelines import SegmentationStrategy, TranscriptionTask
+from ..pipeline import TranscriptionTask
+from .strategy import SegmentationStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -42,65 +43,36 @@ class FixedSegmentationStrategy(SegmentationStrategy):
             f"Chunk Size: {self.chunk_size_frames} frames)"
         )
 
-    async def process(self) -> None:
-        """Process raw audio frames into fixed-duration chunks."""
-        logger.info("Fixed-duration segmentation processor started")
+    async def _consume_item(self, raw_frame: np.ndarray) -> None:
+        """Process a single raw audio frame into fixed-duration chunks."""
+        # Append to buffer
+        self._buffer = np.concatenate((self._buffer, raw_frame))
 
-        # Clear buffer when starting
+        # Process buffer if enough data for a chunk
+        while len(self._buffer) >= self.chunk_size_frames:
+            # Extract chunk
+            chunk = self._buffer[: self.chunk_size_frames].astype(
+                AUDIO_DTYPE
+            )
+
+            # Remove chunk from buffer (non-overlapping)
+            self._buffer = self._buffer[self.chunk_size_frames :]
+
+            # Only send for transcription if we have an active output mode
+            if self._active_mode is not None:
+                logger.debug(
+                    f"Fixed-duration chunk ready: {len(chunk)} frames "
+                    f"({len(chunk) / SAMPLE_RATE:.1f}s)"
+                )
+                # Create and send task
+                task = TranscriptionTask(
+                    audio=chunk, output_mode=self._active_mode
+                )
+                await self.output_queue.put(task)
+            else:
+                logger.debug("Discarding chunk (no active output mode)")
+
+    async def _on_stop(self) -> None:
+        """Hook for cleanup logic when the component stops."""
+        logger.info("Fixed-duration segmentation processor stopped")
         self._buffer = np.array([], dtype=AUDIO_DTYPE)
-
-        # Create processing task
-        self._processing_task = asyncio.current_task()
-
-        try:
-            while not self.stop_event.is_set():
-                try:
-                    # Try to get and process new data (with timeout to check stop event)
-                    try:
-                        raw_frame = await asyncio.wait_for(
-                            self.raw_audio_queue.get(), timeout=0.5
-                        )
-                    except asyncio.TimeoutError:
-                        continue
-
-                    # Append to buffer
-                    self._buffer = np.concatenate((self._buffer, raw_frame))
-
-                    # Process buffer if enough data for a chunk
-                    while len(self._buffer) >= self.chunk_size_frames:
-                        # Extract chunk
-                        chunk = self._buffer[: self.chunk_size_frames].astype(
-                            AUDIO_DTYPE
-                        )
-
-                        # Remove chunk from buffer (non-overlapping)
-                        self._buffer = self._buffer[self.chunk_size_frames :]
-
-                        # Only send for transcription if we have an active output mode
-                        if self._active_mode is not None:
-                            logger.debug(
-                                f"Fixed-duration chunk ready: {len(chunk)} frames "
-                                f"({len(chunk) / SAMPLE_RATE:.1f}s)"
-                            )
-                            # Create and send task
-                            task = TranscriptionTask(
-                                audio=chunk, output_mode=self._active_mode
-                            )
-                            await self.transcription_queue.put(task)
-                        else:
-                            logger.debug("Discarding chunk (no active output mode)")
-
-                    # Mark raw frame as processed
-                    self.raw_audio_queue.task_done()
-
-                except asyncio.CancelledError:
-                    logger.info("Fixed-duration segmentation processor cancelled")
-                    break
-
-                except Exception as e:
-                    logger.exception(f"Error in fixed-duration segmentation processor: {e}")
-                    # Avoid tight loop on error
-                    await asyncio.sleep(0.5)
-
-        finally:
-            logger.info("Fixed-duration segmentation processor stopped")

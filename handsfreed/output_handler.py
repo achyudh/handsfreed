@@ -7,6 +7,7 @@ from typing import Literal, Optional, Tuple
 
 from .config import OutputConfig
 from .ipc_models import CliOutputMode
+from .pipeline import AbstractPipelineConsumerComponent
 
 logger = logging.getLogger(__name__)
 
@@ -155,83 +156,43 @@ async def execute_output_command(
         return False, msg
 
 
-class OutputHandler:
+class OutputHandler(AbstractPipelineConsumerComponent):
     """Handles output execution for transcribed text."""
 
-    def __init__(self, config: OutputConfig):
+    def __init__(self, config: OutputConfig, output_queue: asyncio.Queue, stop_event: asyncio.Event):
         """Initialize output handler.
 
         Args:
             config: Output configuration containing commands
+            output_queue: Queue to receive (text, mode) tuples from.
+            stop_event: Event to signal when to stop processing.
         """
+        super().__init__(output_queue, None, stop_event)
         self.config = config
-        self._task: Optional[asyncio.Task] = None
-        self._stop_event = asyncio.Event()
         self._needs_leading_space: bool = False
 
-    async def _output_loop(self, input_queue: asyncio.Queue) -> None:
-        """Process output requests from queue.
+    async def _consume_item(self, item: Tuple[str, CliOutputMode]) -> None:
+        """Process a single output request."""
+        text, mode = item
+        # Apply spacing logic - prepend space if needed
+        if text:
+            text_to_output = text
+            if self._needs_leading_space:
+                logger.debug("Prepending space to output")
+                text_to_output = " " + text
 
-        Args:
-            input_queue: Queue containing (text, mode) tuples
-        """
-        logger.info("Output handler started")
+            # Execute the output command
+            success, error = await execute_output_command(
+                text_to_output, mode, self.config
+            )
 
-        while not self._stop_event.is_set():
-            try:
-                # Get next output request (with timeout to check stop event)
-                try:
-                    text, mode = await asyncio.wait_for(input_queue.get(), timeout=0.5)
-                except asyncio.TimeoutError:
-                    continue
-
-                try:
-                    # Apply spacing logic - prepend space if needed
-                    if text:
-                        text_to_output = text
-                        if self._needs_leading_space:
-                            logger.debug("Prepending space to output")
-                            text_to_output = " " + text
-
-                        # Execute the output command
-                        success, error = await execute_output_command(
-                            text_to_output, mode, self.config
-                        )
-
-                        if success:
-                            # Set flag for next time only if this output succeeded
-                            self._needs_leading_space = True
-                        else:
-                            logger.error(f"Output failed: {error}")
-                    else:
-                        logger.warning("Skipping empty text output")
-                finally:
-                    # Always mark task as done
-                    input_queue.task_done()
-
-            except asyncio.CancelledError:
-                logger.info("Output handler cancelled")
-                break
-            except Exception as e:
-                logger.exception(f"Error in output handler: {e}")
-                # Avoid tight loop on unexpected errors
-                await asyncio.sleep(0.5)
-
-        logger.info("Output handler stopped")
-
-    async def start(self, input_queue: asyncio.Queue) -> None:
-        """Start the output handler.
-
-        Args:
-            input_queue: Queue to receive (text, mode) tuples from
-        """
-        if self._task and not self._task.done():
-            logger.warning("Output handler already running")
-            return
-
-        logger.info("Starting output handler")
-        self._stop_event.clear()
-        self._task = asyncio.create_task(self._output_loop(input_queue))
+            if success:
+                # Set flag for next time only if this output succeeded
+                self._needs_leading_space = True
+            else:
+                logger.error(f"Output failed: {error}")
+        else:
+            logger.warning("Skipping empty text output")
 
     def reset_spacing_state(self):
         """Reset the spacing flag (e.g., after Start or Stop command).
@@ -241,25 +202,3 @@ class OutputHandler:
         """
         logger.debug("Resetting output spacing state")
         self._needs_leading_space = False
-
-    async def stop(self) -> None:
-        """Stop the output handler."""
-        if not self._task or self._task.done():
-            logger.warning("Output handler not running")
-            return
-
-        logger.info("Stopping output handler")
-        self._stop_event.set()
-
-        try:
-            # Wait for task to finish with timeout
-            await asyncio.wait_for(self._task, timeout=5.0)
-            logger.info("Output handler stopped gracefully")
-        except asyncio.TimeoutError:
-            logger.warning("Timeout waiting for output handler to stop")
-            self._task.cancel()
-            await asyncio.sleep(0.1)  # Give cancel time to process
-        except Exception as e:
-            logger.exception(f"Error stopping output handler: {e}")
-        finally:
-            self._task = None

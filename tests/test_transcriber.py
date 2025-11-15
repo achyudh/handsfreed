@@ -10,7 +10,7 @@ import pytest_asyncio
 from faster_whisper import WhisperModel
 from handsfreed.config import AppConfig, WhisperConfig
 from handsfreed.ipc_models import CliOutputMode
-from handsfreed.pipelines import TranscriptionTask
+from handsfreed.pipeline import TranscriptionTask
 from handsfreed.transcriber import Transcriber
 
 
@@ -75,14 +75,19 @@ def mock_model():
     return model
 
 
+@pytest.fixture
+def stop_event():
+    """Create a stop event."""
+    return asyncio.Event()
+
+
 @pytest_asyncio.fixture
-async def transcriber(config, transcription_queue, output_queue):
+async def transcriber(config, transcription_queue, output_queue, stop_event):
     """Create a transcriber instance."""
-    trans = Transcriber(config, transcription_queue, output_queue)
+    trans = Transcriber(config, transcription_queue, output_queue, stop_event)
     yield trans
     # Cleanup
-    if trans._transcription_task:
-        await trans.stop()
+    await trans.stop()
 
 
 def test_load_model_success(transcriber):
@@ -119,17 +124,17 @@ def test_load_model_already_loaded(transcriber, mock_model):
 @pytest.mark.asyncio
 async def test_start_without_model(transcriber):
     """Test start fails without model."""
-    assert await transcriber.start() is False
+    with pytest.raises(RuntimeError, match="Model not loaded"):
+        await transcriber.start()
 
 
 @pytest.mark.asyncio
 async def test_transcription_success_keyboard(
     transcriber, mock_model, transcription_queue, output_queue
 ):
-    """Test successful transcription to keyboard."""
     transcriber._model = mock_model
 
-    assert await transcriber.start() is True
+    await transcriber.start()
 
     # Create and send test task
     test_audio = np.zeros(16000, dtype=np.float32)  # 1 second of silence
@@ -149,7 +154,7 @@ async def test_transcription_success_clipboard(
     """Test successful transcription to clipboard."""
     transcriber._model = mock_model
 
-    assert await transcriber.start() is True
+    await transcriber.start()
 
     # Create and send test task
     test_audio = np.zeros(16000, dtype=np.float32)  # 1 second of silence
@@ -213,13 +218,13 @@ async def test_multiple_start_stop(transcriber, mock_model):
 
     # First cycle
     await transcriber.start()
-    task1 = transcriber._transcription_task
+    task1 = transcriber._task
     await transcriber.stop()
 
     # Second cycle
     await transcriber.start()
-    task2 = transcriber._transcription_task
+    task2 = transcriber._task
     await transcriber.stop()
 
     assert task1 is not task2  # Should be different task objects
-    assert transcriber._transcription_task is None  # Should be cleaned up
+    assert transcriber._task is None  # Should be cleaned up

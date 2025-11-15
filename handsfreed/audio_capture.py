@@ -9,6 +9,7 @@ import sounddevice as sd
 from typing import Optional
 
 from .config import AudioConfig
+from .pipeline import AbstractPipelineProducerComponent
 
 logger = logging.getLogger(__name__)
 
@@ -20,14 +21,18 @@ AUDIO_DTYPE = np.float32
 # Small frames for segmentation strategies
 FRAME_SIZE = 512  # frames (~32ms at 16kHz)
 
+# Timeout for getting items from the thread-safe queue
+QUEUE_GET_TIMEOUT = 0.1
 
-class AudioCapture:
+
+class AudioCapture(AbstractPipelineProducerComponent):
     """Captures audio using sounddevice and provides raw audio frames."""
 
     def __init__(
         self,
         raw_audio_queue: asyncio.Queue,
         audio_config: AudioConfig,
+        stop_event: asyncio.Event,
         device: Optional[int] = None,
     ):
         """Initialize audio capture.
@@ -35,17 +40,16 @@ class AudioCapture:
         Args:
             raw_audio_queue: Queue to put raw audio frames onto
             audio_config: Audio configuration object.
+            stop_event: Event to signal when to stop processing.
             device: Optional input device index (None for system default)
         """
-        self.raw_audio_queue = raw_audio_queue
+        super().__init__(raw_audio_queue, stop_event)
         self.audio_config = audio_config
         self.device = device
 
         # Initialize internal state
         self._stream: Optional[sd.InputStream] = None
         self._raw_thread_q = queue.Queue()  # Thread-safe queue for callback data
-        self._processing_task: Optional[asyncio.Task] = None
-        self._stop_event = asyncio.Event()
 
         # Buffer for running DC offset calculation
         frame_duration_ms = (FRAME_SIZE / SAMPLE_RATE) * 1000
@@ -91,51 +95,16 @@ class AudioCapture:
             # Avoid crashes in audio callback
             logger.error(f"Error in audio callback: {e}")
 
-    async def _process_new_data(self) -> bool:
-        """Process new data from thread-safe queue.
-
-        Returns:
-            True if data was processed, False if queue was empty.
-        """
+    async def _produce_item(self) -> Optional[np.ndarray]:
+        """Get a raw audio frame from the thread-safe queue."""
         try:
-            raw_frame = await asyncio.to_thread(self._raw_thread_q.get_nowait)
-            # Put directly onto the asyncio queue for segmentation strategies
-            await self.raw_audio_queue.put(raw_frame)
-            return True
+            return await asyncio.to_thread(self._raw_thread_q.get, timeout=QUEUE_GET_TIMEOUT)
         except queue.Empty:
-            return False
+            return None
 
-    async def _frame_processor(self) -> None:
-        """Process incoming audio from sounddevice callback."""
-        logger.info("Audio frame processor started")
-
-        while not self._stop_event.is_set():
-            try:
-                # Try to get and process new data
-                got_data = await self._process_new_data()
-                if not got_data:
-                    # No new data, yield control
-                    await asyncio.sleep(0.01)
-                    continue
-
-            except asyncio.CancelledError:
-                logger.info("Audio frame processor task cancelled")
-                break
-            except Exception as e:
-                logger.exception(f"Error in audio frame processor task: {e}")
-                # Avoid tight loop on error
-                await asyncio.sleep(0.5)
-
-        logger.info("Audio frame processor finished")
-
-    async def start(self) -> None:
-        """Start audio capture."""
-        if self._stream is not None or self._processing_task is not None:
-            logger.warning("Audio capture already running")
-            return
-
+    async def _on_start(self) -> None:
+        """Start the sounddevice stream."""
         logger.info(f"Starting audio capture (Device: {self.device or 'Default'})")
-        self._stop_event.clear()
         self._dc_offset_buffer.clear()
 
         # Clear the raw queue in case of restart
@@ -146,9 +115,6 @@ class AudioCapture:
                 break
 
         try:
-            # Start the frame processing task first
-            self._processing_task = asyncio.create_task(self._frame_processor())
-
             # Start the sounddevice stream
             self._stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
@@ -168,27 +134,16 @@ class AudioCapture:
 
         except sd.PortAudioError as e:
             logger.error(f"PortAudio error starting audio stream: {e}")
-            if self._processing_task and not self._processing_task.done():
-                self._processing_task.cancel()
             self._stream = None
-            self._processing_task = None
             raise
         except Exception as e:
             logger.exception(f"Failed to start audio capture: {e}")
-            if self._processing_task and not self._processing_task.done():
-                self._processing_task.cancel()
             self._stream = None
-            self._processing_task = None
             raise
 
-    async def stop(self) -> None:
-        """Stop audio capture."""
-        if self._stream is None and self._processing_task is None:
-            logger.warning("Audio capture not running")
-            return
-
+    async def _on_stop(self) -> None:
+        """Stop the sounddevice stream."""
         logger.info("Stopping audio capture...")
-        self._stop_event.set()  # Signal processor task to stop
 
         # Stop and close the stream
         if self._stream is not None:
@@ -204,23 +159,5 @@ class AudioCapture:
                 logger.exception(f"Error stopping audio stream: {e}")
             finally:
                 self._stream = None
-
-        # Wait for the processing task to finish
-        if self._processing_task is not None:
-            try:
-                # Wait with a timeout for the task to finish/cancel
-                await asyncio.wait_for(self._processing_task, timeout=2.0)
-                logger.info("Audio frame processor finished")
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for audio frame processor to finish")
-                self._processing_task.cancel()
-                # Wait a bit more after cancelling
-                await asyncio.sleep(0.1)
-            except asyncio.CancelledError:
-                logger.info("Audio frame processor was cancelled")
-            except Exception as e:
-                logger.exception(f"Error waiting for audio frame processor: {e}")
-            finally:
-                self._processing_task = None
 
         logger.info("Audio capture stopped")

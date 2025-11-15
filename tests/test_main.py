@@ -95,7 +95,7 @@ async def test_main_startup_shutdown(mock_config, mock_handlers):
         mock_handlers["trans"].load_model.assert_called_once()
         mock_handlers["trans"].start.assert_awaited_once()
         mock_handlers["output"].start.assert_awaited_once()
-        mock_handlers["fixed_strategy"].process.assert_awaited_once()
+        mock_handlers["fixed_strategy"].start.assert_awaited_once()
         mock_handlers["ipc"].start.assert_awaited_once()
 
         # Verify shutdown
@@ -130,14 +130,14 @@ async def test_main_model_load_failure(mock_config, mock_handlers):
 
     # Verify nothing was started
     mock_handlers["ipc"].start.assert_not_awaited()
-    mock_handlers["fixed_strategy"].process.assert_not_awaited()
+    mock_handlers["fixed_strategy"].start.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_main_transcriber_start_failure(mock_config, mock_handlers):
     """Test handling of transcriber start failure."""
     # Make transcriber start fail
-    mock_handlers["trans"].start.return_value = False
+    mock_handlers["trans"].start.side_effect = RuntimeError("Test error")
 
     # Run main (should return on transcriber start failure)
     exit_code = await main()
@@ -183,7 +183,7 @@ async def test_vad_strategy_selection(mock_config, mock_handlers):
 
         # Verify VADSegmentationStrategy was created
         mock_handlers["mock_vad_strategy_class"].assert_called_once()
-        mock_handlers["vad_strategy"].process.assert_awaited_once()
+        mock_handlers["vad_strategy"].start.assert_awaited_once()
         mock_handlers["mock_fixed_strategy_class"].assert_not_called()
         mock_get_vad_model.assert_called_once()
 
@@ -202,5 +202,5 @@ async def test_strategy_selection(mock_config, mock_handlers):
 
     # Verify FixedSegmentationStrategy was created
     mock_handlers["mock_fixed_strategy_class"].assert_called_once()
-    mock_handlers["fixed_strategy"].process.assert_awaited_once()
+    mock_handlers["fixed_strategy"].start.assert_awaited_once()
     mock_handlers["mock_vad_strategy_class"].assert_not_called()

@@ -12,7 +12,8 @@ from .ipc_server import IPCServer
 from .logging_setup import setup_logging
 from .output_handler import OutputHandler
 from .state import DaemonStateManager
-from .segmentation import FixedSegmentationStrategy, VADSegmentationStrategy
+from .segmentation.fixed import FixedSegmentationStrategy
+from .segmentation.vad import VADSegmentationStrategy
 from .transcriber import Transcriber
 
 # Import VAD model loader
@@ -58,12 +59,9 @@ async def main() -> int:
     output_queue = asyncio.Queue()  # Text + mode from transcriber to output
 
     # Create component instances (but don't start them yet)
-    audio_capture = AudioCapture(raw_audio_queue, config.audio)
-    transcriber = Transcriber(config, transcription_queue, output_queue)
-    output_handler = OutputHandler(config.output)
-
-    # Create and start tasks
-    tasks = []
+    audio_capture = AudioCapture(raw_audio_queue, config.audio, stop_event)
+    transcriber = Transcriber(config, transcription_queue, output_queue, stop_event)
+    output_handler = OutputHandler(config.output, output_queue, stop_event)
 
     try:
         # Load the Whisper model (can take a while)
@@ -99,17 +97,10 @@ async def main() -> int:
                 raw_audio_queue, transcription_queue, stop_event, config
             )
 
-        # Start transcriber
-        if not await transcriber.start():
-            logger.error("Failed to start transcriber")
-            return 1
-
-        # Start output handler
-        await output_handler.start(output_queue)
-
-        # Create and start segmentation strategy processing task
-        strategy_task = asyncio.create_task(segmentation_strategy.process())
-        tasks.append(strategy_task)
+        # Start pipeline components
+        await transcriber.start()
+        await output_handler.start()
+        await segmentation_strategy.start()
 
         # Create IPC server with all components
         ipc_server = IPCServer(
@@ -144,15 +135,7 @@ async def main() -> int:
 
         # Stop in reverse order to avoid dangling tasks
         await ipc_server.stop()
-        stop_event.set()  # Signal strategies to stop
-
-        # Cancel and await all tasks
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        stop_event.set()  # Signal components to stop
 
         # Stop components
         await segmentation_strategy.stop()
@@ -165,11 +148,6 @@ async def main() -> int:
         logger.exception("Fatal error in daemon:")
         # Try to clean up if we can
         stop_event.set()
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
 
         # Stop components
         if "segmentation_strategy" in locals():

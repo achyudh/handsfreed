@@ -8,6 +8,7 @@ import numpy as np
 from faster_whisper import WhisperModel
 
 from .config import AppConfig
+from .pipeline import AbstractPipelineConsumerComponent, TranscriptionTask
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ class TranscriptionResult:
         return self.text
 
 
-class Transcriber:
+class Transcriber(AbstractPipelineConsumerComponent):
     """Handles audio transcription using faster-whisper."""
 
     def __init__(
@@ -39,6 +40,7 @@ class Transcriber:
         config: AppConfig,
         transcription_queue: asyncio.Queue,
         output_queue: asyncio.Queue,
+        stop_event: asyncio.Event,
     ):
         """Initialize the transcriber.
 
@@ -46,15 +48,11 @@ class Transcriber:
             config: Application configuration.
             transcription_queue: Queue to receive TranscriptionTask objects.
             output_queue: Queue to put (text, mode) tuples onto.
+            stop_event: Event to signal when to stop processing.
         """
+        super().__init__(transcription_queue, output_queue, stop_event)
         self.whisper_config = config.whisper
-        self.transcription_queue = transcription_queue
-        self.output_queue = output_queue
-
-        # Initialize internals
         self._model: Optional[WhisperModel] = None
-        self._transcription_task: Optional[asyncio.Task] = None
-        self._stop_event = asyncio.Event()
 
     def load_model(self) -> bool:
         """Load the Whisper model.
@@ -135,102 +133,39 @@ class Transcriber:
             logger.exception("Error during transcription")
             return None, str(e)
 
-    async def _transcription_loop(self) -> None:
-        """Main transcription loop."""
+    async def _consume_item(self, task: TranscriptionTask) -> None:
+        """Process a single transcription task."""
         if not self._model:
-            logger.error("Cannot start transcription loop: Model not loaded")
+            logger.error("Cannot process item: Model not loaded")
             return
 
-        logger.info("Transcription loop started")
+        # Run transcription in thread pool
+        result, error = await asyncio.to_thread(
+            self._run_transcription, task.audio
+        )
 
-        while not self._stop_event.is_set():
-            try:
-                # Get a transcription task (with timeout to check stop event)
-                try:
-                    task = await asyncio.wait_for(
-                        self.transcription_queue.get(), timeout=0.5
-                    )
-                except asyncio.TimeoutError:
-                    continue
+        if error:
+            logger.error(f"Transcription error: {error}")
+            return
 
-                try:
-                    # Run transcription in thread pool
-                    result, error = await asyncio.to_thread(
-                        self._run_transcription, task.audio
-                    )
+        if result and result.text:
+            logger.info(
+                f"Transcribed [{result.language or 'unknown'}] "
+                f"for {task.output_mode.value}: {result.text[:100]}..."
+            )
+            if result.language_probability is not None:
+                logger.debug(
+                    f"Language probability: {result.language_probability:.2f}"
+                )
 
-                    if error:
-                        logger.error(f"Transcription error: {error}")
-                        continue
+            # Put transcription and output mode on output queue
+            if self.output_queue:
+                await self.output_queue.put((result.text, task.output_mode))
+        else:
+            logger.debug("No transcription result")
 
-                    if result and result.text:
-                        logger.info(
-                            f"Transcribed [{result.language or 'unknown'}] "
-                            f"for {task.output_mode.value}: {result.text[:100]}..."
-                        )
-                        if result.language_probability is not None:
-                            logger.debug(
-                                f"Language probability: {result.language_probability:.2f}"
-                            )
-
-                        # Put transcription and output mode on output queue
-                        await self.output_queue.put((result.text, task.output_mode))
-                    else:
-                        logger.debug("No transcription result")
-
-                finally:
-                    # Mark task as done
-                    self.transcription_queue.task_done()
-
-            except asyncio.CancelledError:
-                logger.info("Transcription loop cancelled")
-                break
-
-            except Exception as e:
-                logger.exception(f"Error in transcription loop: {e}")
-                # Avoid tight loop on unexpected error
-                await asyncio.sleep(0.5)
-
-        logger.info("Transcription loop stopped")
-
-    async def start(self) -> bool:
-        """Start the transcription loop.
-
-        Returns:
-            True if started successfully, False otherwise.
-        """
-        if self._transcription_task and not self._transcription_task.done():
-            logger.warning("Transcription task already running")
-            return True
-
+    async def _on_start(self) -> None:
+        """Hook for setup logic before the component starts."""
         if not self._model:
             logger.error("Cannot start transcription: Model not loaded")
-            return False
-
-        logger.info("Starting transcription loop")
-        self._stop_event.clear()
-        self._transcription_task = asyncio.create_task(self._transcription_loop())
-        return True
-
-    async def stop(self) -> None:
-        """Stop the transcription loop."""
-        if not self._transcription_task or self._transcription_task.done():
-            logger.warning("Transcription task not running")
-            return
-
-        logger.info("Stopping transcription loop")
-        self._stop_event.set()
-
-        try:
-            # Wait with timeout for task to finish
-            await asyncio.wait_for(self._transcription_task, timeout=5.0)
-            logger.info("Transcription loop stopped gracefully")
-        except asyncio.TimeoutError:
-            logger.warning("Timeout waiting for transcription loop to stop")
-            self._transcription_task.cancel()
-            # Wait a bit more after cancelling
-            await asyncio.sleep(0.1)
-        except Exception as e:
-            logger.exception(f"Error stopping transcription loop: {e}")
-        finally:
-            self._transcription_task = None
+            raise RuntimeError("Model not loaded")

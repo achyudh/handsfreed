@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 from handsfreed.audio_capture import FRAME_SIZE, SAMPLE_RATE
 from handsfreed.ipc_models import CliOutputMode
-from handsfreed.pipelines import TranscriptionTask
+from handsfreed.pipeline import TranscriptionTask
 from handsfreed.segmentation import (
     FixedSegmentationStrategy,
     VADSegmentationStrategy,
@@ -63,12 +63,7 @@ async def fixed_strategy(raw_audio_queue, transcription_queue, stop_event, confi
     )
     yield strategy
     # Clean up if needed
-    if hasattr(strategy, "_processing_task") and strategy._processing_task:
-        strategy._processing_task.cancel()
-        try:
-            await strategy._processing_task
-        except asyncio.CancelledError:
-            pass
+    await strategy.stop()
 
 
 @pytest.fixture
@@ -106,12 +101,7 @@ async def vad_strategy(
     )
     yield strategy
     # Clean up if needed
-    if hasattr(strategy, "_processing_task") and strategy._processing_task:
-        strategy._processing_task.cancel()
-        try:
-            await strategy._processing_task
-        except asyncio.CancelledError:
-            pass
+    await strategy.stop()
 
 
 @pytest.mark.asyncio
@@ -157,49 +147,39 @@ async def test_fixed_strategy_process_chunk(fixed_strategy):
     frame_size = int(0.1 * SAMPLE_RATE)
     frames = [np.ones(frame_size, dtype=np.float32) * i for i in range(1, 6)]
 
-    # Start processing in background
-    process_task = asyncio.create_task(fixed_strategy.process())
+    # Start processing
+    await fixed_strategy.start()
 
-    try:
-        # Put frames on the queue
-        for frame in frames:
-            await fixed_strategy.raw_audio_queue.put(frame)
-            # Let the loop process
-            await asyncio.sleep(0.01)
+    # Put frames on the queue
+    for frame in frames:
+        await fixed_strategy.input_queue.put(frame)
+        # Let the loop process
+        await asyncio.sleep(0.01)
 
-        # Check we got a transcription task with the right audio
-        # (0.5s chunk size with 5 * 0.1s frames = 1 complete chunk)
-        assert not fixed_strategy.transcription_queue.empty()
+    # Check we got a transcription task with the right audio
+    # (0.5s chunk size with 5 * 0.1s frames = 1 complete chunk)
+    assert not fixed_strategy.output_queue.empty()
 
-        task = await fixed_strategy.transcription_queue.get()
-        assert isinstance(task, TranscriptionTask)
-        assert task.output_mode == CliOutputMode.KEYBOARD
-        assert isinstance(task.audio, np.ndarray)
-        assert len(task.audio) == fixed_strategy.chunk_size_frames
+    task = await fixed_strategy.output_queue.get()
+    assert isinstance(task, TranscriptionTask)
+    assert task.output_mode == CliOutputMode.KEYBOARD
+    assert isinstance(task.audio, np.ndarray)
+    assert len(task.audio) == fixed_strategy.chunk_size_frames
 
-        # The task should contain the first 0.5s of audio (first 5 frames)
-        assert np.array_equal(task.audio[:frame_size], np.ones(frame_size) * 1)
-        assert np.array_equal(
-            task.audio[frame_size : frame_size * 2], np.ones(frame_size) * 2
-        )
-        assert np.array_equal(
-            task.audio[frame_size * 2 : frame_size * 3], np.ones(frame_size) * 3
-        )
-        assert np.array_equal(
-            task.audio[frame_size * 3 : frame_size * 4], np.ones(frame_size) * 4
-        )
-        assert np.array_equal(
-            task.audio[frame_size * 4 : frame_size * 5], np.ones(frame_size) * 5
-        )
-
-    finally:
-        # Clean up the process task
-        if not process_task.done():
-            process_task.cancel()
-            try:
-                await process_task
-            except asyncio.CancelledError:
-                pass
+    # The task should contain the first 0.5s of audio (first 5 frames)
+    assert np.array_equal(task.audio[:frame_size], np.ones(frame_size) * 1)
+    assert np.array_equal(
+        task.audio[frame_size : frame_size * 2], np.ones(frame_size) * 2
+    )
+    assert np.array_equal(
+        task.audio[frame_size * 2 : frame_size * 3], np.ones(frame_size) * 3
+    )
+    assert np.array_equal(
+        task.audio[frame_size * 3 : frame_size * 4], np.ones(frame_size) * 4
+    )
+    assert np.array_equal(
+        task.audio[frame_size * 4 : frame_size * 5], np.ones(frame_size) * 5
+    )
 
 
 @pytest.mark.asyncio
@@ -212,26 +192,16 @@ async def test_fixed_strategy_no_output_when_inactive(fixed_strategy):
     frame_size = int(0.1 * SAMPLE_RATE)
     frames = [np.ones(frame_size, dtype=np.float32) * i for i in range(1, 10)]
 
-    # Start processing in background
-    process_task = asyncio.create_task(fixed_strategy.process())
+    # Start processing
+    await fixed_strategy.start()
 
-    try:
-        # Put frames on the queue (should produce 1.5 chunks worth of data)
-        for frame in frames:
-            await fixed_strategy.raw_audio_queue.put(frame)
-            await asyncio.sleep(0.01)
+    # Put frames on the queue (should produce 1.5 chunks worth of data)
+    for frame in frames:
+        await fixed_strategy.input_queue.put(frame)
+        await asyncio.sleep(0.01)
 
-        # Check no transcription tasks were produced
-        assert fixed_strategy.transcription_queue.empty()
-
-    finally:
-        # Clean up the process task
-        if not process_task.done():
-            process_task.cancel()
-            try:
-                await process_task
-            except asyncio.CancelledError:
-                pass
+    # Check no transcription tasks were produced
+    assert fixed_strategy.output_queue.empty()
 
 
 @pytest.mark.asyncio
@@ -245,29 +215,23 @@ async def test_fixed_strategy_stop():
     config.daemon = Mock()
     config.daemon.time_chunk_s = 0.5
 
-    # Create the strategy with a mocked stop method to avoid using AsyncMock directly
+    # Create the strategy
     strategy = FixedSegmentationStrategy(raw_queue, trans_queue, stop_event, config)
 
-    # Replace the stop method - we're not testing the parent stop method, just that it's called
-    original_stop = strategy.stop
-    strategy.stop = AsyncMock()
+    # Start the strategy
+    await strategy.start()
 
-    # Start a simple process task that can be properly cancelled
-    process_task = asyncio.create_task(asyncio.sleep(10))
-    strategy._processing_task = process_task
+    # Stop the strategy
+    await strategy.stop()
 
-    # Call the parent class stop method directly
-    await original_stop()
-
-    # Check that the process task was cancelled
-    assert process_task.cancelled()
-
+    # Check that the processing task is no longer running
+    assert strategy._task is None or strategy._task.done()
 
 @pytest.mark.asyncio
 async def test_fixed_strategy_respects_stop_event(fixed_strategy, stop_event):
     """Test fixed strategy stops when stop event is set."""
-    # Start processing in background
-    process_task = asyncio.create_task(fixed_strategy.process())
+    # Start processing
+    await fixed_strategy.start()
 
     # Set active mode
     await fixed_strategy.set_active_output_mode(CliOutputMode.KEYBOARD)
@@ -280,13 +244,12 @@ async def test_fixed_strategy_respects_stop_event(fixed_strategy, stop_event):
 
     # Wait for task completion
     try:
-        await asyncio.wait_for(process_task, timeout=1)
+        await asyncio.wait_for(fixed_strategy._task, timeout=1)
     except asyncio.TimeoutError:
         pytest.fail("Strategy didn't respect stop event")
 
     # Task should be done
-    assert process_task.done()
-
+    assert fixed_strategy._task.done()
 
 @pytest.mark.asyncio
 async def test_vad_strategy_init(vad_strategy, vad_config_mock):
@@ -490,8 +453,8 @@ async def test_vad_strategy_direct():
     assert strategy._vad_state == VADState.SILENT
 
     # Verify a transcription task was created
-    assert not trans_queue.empty()
-    task = trans_queue.get_nowait()
+    assert not strategy.output_queue.empty()
+    task = strategy.output_queue.get_nowait()
     assert isinstance(task, TranscriptionTask)
     assert task.output_mode == CliOutputMode.KEYBOARD
 
@@ -570,8 +533,8 @@ async def test_max_speech_duration():
     assert strategy._vad_state == VADState.SILENT
 
     # Verify a transcription task was created
-    assert not trans_queue.empty()
-    task = trans_queue.get_nowait()
+    assert not strategy.output_queue.empty()
+    task = strategy.output_queue.get_nowait()
     assert isinstance(task, TranscriptionTask)
     assert task.output_mode == CliOutputMode.KEYBOARD
 
@@ -624,7 +587,7 @@ async def test_min_speech_duration():
     await strategy._finalize_segment()
 
     # Verify no task was created (segment too short)
-    assert trans_queue.empty()
+    assert strategy.output_queue.empty()
 
     # Add more frames to exceed minimum duration
     strategy._current_segment.append(test_frame.copy())
@@ -641,8 +604,8 @@ async def test_min_speech_duration():
     await strategy._finalize_segment()
 
     # Now a task should be created
-    assert not trans_queue.empty()
-    task = await trans_queue.get()
+    assert not strategy.output_queue.empty()
+    task = await strategy.output_queue.get()
     assert isinstance(task, TranscriptionTask)
     assert task.output_mode == CliOutputMode.KEYBOARD
 

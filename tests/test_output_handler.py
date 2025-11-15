@@ -40,13 +40,18 @@ def output_queue():
     return asyncio.Queue()
 
 
+@pytest.fixture
+def stop_event():
+    """Create a stop event."""
+    return asyncio.Event()
+
+
 @pytest_asyncio.fixture
-async def handler(config):
+async def handler(config, output_queue, stop_event):
     """Create output handler."""
-    handler = OutputHandler(config)
+    handler = OutputHandler(config, output_queue, stop_event)
     yield handler
-    if handler._task:
-        await handler.stop()
+    await handler.stop()
 
 
 def test_get_session_type_wayland():
@@ -323,13 +328,12 @@ async def test_configured_command_overrides_default(empty_config):
 @pytest.mark.asyncio
 async def test_handler_start_stop(handler, output_queue):
     """Test output handler start/stop."""
-    await handler.start(output_queue)
+    await handler.start()
     assert handler._task is not None
     assert not handler._task.done()
 
     await handler.stop()
     assert handler._task is None
-    assert handler._stop_event.is_set()
 
 
 @pytest.mark.asyncio
@@ -338,7 +342,7 @@ async def test_handler_process_output(handler, output_queue):
     mock_execute = AsyncMock(return_value=(True, None))
 
     with patch("handsfreed.output_handler.execute_output_command", mock_execute):
-        await handler.start(output_queue)
+        await handler.start()
 
         # Send test output request
         await output_queue.put(("test text", CliOutputMode.KEYBOARD))
@@ -356,7 +360,7 @@ async def test_handler_multiple_outputs(handler, output_queue):
     mock_execute = AsyncMock(return_value=(True, None))
 
     with patch("handsfreed.output_handler.execute_output_command", mock_execute):
-        await handler.start(output_queue)
+        await handler.start()
 
         # Send multiple output requests
         await output_queue.put(("text1", CliOutputMode.KEYBOARD))
@@ -374,7 +378,7 @@ async def test_spacing_state_reset(handler, output_queue):
     mock_execute.side_effect = [(True, None), (True, None), (True, None)]
 
     with patch("handsfreed.output_handler.execute_output_command", mock_execute):
-        await handler.start(output_queue)
+        await handler.start()
 
         # First text should NOT have space (default state)
         await output_queue.put(("Text1", CliOutputMode.KEYBOARD))
@@ -404,7 +408,7 @@ async def test_spacing_state_on_failed_output(handler, output_queue):
     mock_execute.side_effect = [(True, None), (False, "Error"), (True, None)]
 
     with patch("handsfreed.output_handler.execute_output_command", mock_execute):
-        await handler.start(output_queue)
+        await handler.start()
 
         # First text succeeds - sets needs_leading_space to True
         await output_queue.put(("Text1", CliOutputMode.KEYBOARD))
