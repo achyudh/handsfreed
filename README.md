@@ -27,11 +27,9 @@ This package is the daemon component of the [Handsfree](https://github.com/achyu
 
 The `handsfreed` daemon is controlled by the `handsfreectl` command-line tool. You must install it separately.
 
-*   **Pre-compiled Binaries**
-    You can download a pre-compiled binary from the [handsfreectl releases page](https://github.com/achyudh/handsfreectl/releases).
+*   You can download pre-compiled binaries from the [handsfreectl releases page](https://github.com/achyudh/handsfreectl/releases).
 
-*   **From Crates.io**
-    If you have the Cargo installed, you can install `handsfreectl` from Crates.io:
+*   If you have the Cargo installed, you can install `handsfreectl` from Crates.io:
     ```bash
     cargo install handsfreectl
     ```
@@ -44,9 +42,9 @@ pip install handsfreed
 
 ### Nix Flake
 
-If you use the [Nix package manager](https://nixos.org/) with flakes enabled, there is a [Handsfree flake](https://github.com/achyudh/handsfree) that provides the `handsfreectl` and `handsfreed` packages along with a Home Manager module to configure and manage the `handsfreed` daemon as a systemd service.
+If you use the [Nix package manager](https://nixos.org/) with flakes enabled, the [Handsfree flake](https://github.com/achyudh/handsfree) provides both `handsfreectl` and `handsfreed` packages along with a Home Manager module to configure and manage the `handsfreed` daemon as a systemd service.
 
-For detailed instructions on how to add the flake to your system and configure the service, please refer to the **[Handsfree flake readme](https://github.com/achyudh/handsfreed/blob/main/README.md)**.
+For detailed instructions on how to add the flake to your system and configure the service, please refer to the Handsfree flake's **[README](https://github.com/achyudh/handsfreed/blob/main/README.md)**.
 
 ## Usage
 
@@ -55,14 +53,13 @@ For detailed instructions on how to add the flake to your system and configure t
 1.  **Create a configuration file:**
     Create a configuration file at `~/.config/handsfree/config.toml`. You can start with the [example configuration](https://github.com/achyudh/handsfreed/blob/main/example.config.toml).
 
-2.  **Run the daemon:**
+2.  **Run the daemon:** The daemon will start listening for commands from `handsfreectl`.
     ```bash
     handsfreed
     ```
-    The daemon will start listening for commands from `handsfreectl`.
 
 3.  **Control with `handsfreectl`:**
-    Use the [`handsfreectl`](https://github.com/achyudh/handsfreectl) CLI to start/stop transcription and check the status of the daemon.
+    Use the `handsfreectl` CLI to start/stop transcription and check the status of the daemon.
 
 ## Configuration
 
