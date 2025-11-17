@@ -25,6 +25,8 @@ let
       pytest-asyncio
       setuptools # >=45
       wheel
+      build
+      twine
     ];
 
   # Create the specific Python environment with the listed packages
