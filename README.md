@@ -1,5 +1,10 @@
 # handsfreed
 
+[![CI](https://github.com/achyudh/handsfreed/actions/workflows/ci.yml/badge.svg)](https://github.com/achyudh/handsfreed/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/handsfreed.svg)](https://pypi.org/project/handsfreed/)
+[![Python Versions](https://img.shields.io/pypi/pyversions/handsfreed.svg)](https://pypi.org/project/handsfreed/)
+[![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
 `handsfreed` is a local, real-time speech-to-text daemon for Linux. It uses the `faster-whisper` library to provide high-quality, offline transcription.
 
 This package is the daemon component of the [Handsfree](https://github.com/achyudh/handsfree) project. It is controlled by the [`handsfreectl`](https://crates.io/crates/handsfreectl) command-line tool.
