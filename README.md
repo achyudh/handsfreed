@@ -12,7 +12,6 @@ This package is the daemon component of the [Handsfree](https://github.com/achyu
 
 *   **Debian/Ubuntu:**
     ```bash
-    sudo apt-get update
     sudo apt-get install libportaudio2 libportaudiocpp0 portaudio19-dev
     ```
 
@@ -26,7 +25,18 @@ This package is the daemon component of the [Handsfree](https://github.com/achyu
     sudo pacman -S portaudio
     ```
 
-Once the system dependencies are installed, you can install `handsfreed` using `pip`:
+The `handsfreed` daemon is controlled by the `handsfreectl` command-line tool. You must install it separately.
+
+*   **Pre-compiled Binaries**
+    You can download a pre-compiled binary from the [handsfreectl releases page](https://github.com/achyudh/handsfreectl/releases).
+
+*   **From Crates.io**
+    If you have the Cargo installed, you can install `handsfreectl` from Crates.io:
+    ```bash
+    cargo install handsfreectl
+    ```
+
+Once the dependencies are installed, you can install `handsfreed` using `pip`:
 
 ```bash
 pip install handsfreed
@@ -34,7 +44,9 @@ pip install handsfreed
 
 ### Nix Flake
 
-If you are using Nix with Flakes enabled, `handsfreed` can be installed by following the instructions [here](https://github.com/achyudh/handsfree#nix-flake).
+If you use the [Nix package manager](https://nixos.org/) with flakes enabled, there is a [Handsfree flake](https://github.com/achyudh/handsfree) that provides the `handsfreectl` and `handsfreed` packages along with a Home Manager module to configure and manage the `handsfreed` daemon as a systemd service.
+
+For detailed instructions on how to add the flake to your system and configure the service, please refer to the **[Handsfree flake readme](https://github.com/achyudh/handsfreed/blob/main/README.md)**.
 
 ## Usage
 
@@ -50,7 +62,7 @@ If you are using Nix with Flakes enabled, `handsfreed` can be installed by follo
     The daemon will start listening for commands from `handsfreectl`.
 
 3.  **Control with `handsfreectl`:**
-    Use the [`handsfreectl`](https://github.com/achyudh/handsfreectl) CLI to start/stop transcription and check the status of the daemon. You must install it separately.
+    Use the [`handsfreectl`](https://github.com/achyudh/handsfreectl) CLI to start/stop transcription and check the status of the daemon.
 
 ## Configuration
 
