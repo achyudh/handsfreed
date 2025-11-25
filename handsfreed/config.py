@@ -80,6 +80,11 @@ class VadConfig(BaseModel):
     )
     neg_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     max_speech_duration_s: float = Field(default=0.0, ge=0)
+    auto_disable_duration_s: float = Field(
+        default=5.0,
+        ge=0,
+        description="Maximum duration in seconds before listening stops (0 = disabled).",
+    )
 
 
 class WhisperConfig(BaseModel):

@@ -9,6 +9,7 @@ from handsfreed.config import AppConfig, VadConfig
 from handsfreed.ipc_models import CliOutputMode
 from handsfreed.segmentation.fixed import FixedSegmentationStrategy
 from handsfreed.segmentation.vad import VADSegmentationStrategy
+from handsfreed.state import DaemonStateManager, DaemonStateEnum
 
 
 @pytest.fixture
@@ -39,7 +40,8 @@ async def pipeline_manager(mock_config, stop_event):
         mock_segmentation_strategy = AsyncMock()
         mock_create_strategy.return_value = mock_segmentation_strategy
 
-        manager = PipelineManager(mock_config, stop_event)
+        mock_state_manager = Mock(spec=DaemonStateManager)
+        manager = PipelineManager(mock_config, stop_event, mock_state_manager)
         # Replace component instances with mocks
         manager.audio_capture = AsyncMock()
         manager.transcriber = AsyncMock()
@@ -71,7 +73,7 @@ def test_vad_strategy_selection(stop_event):
     config.vad = VadConfig(enabled=True)
 
     with patch("faster_whisper.vad.get_vad_model", return_value=Mock()):
-        manager = PipelineManager(config, stop_event)
+        manager = PipelineManager(config, stop_event, Mock(spec=DaemonStateManager))
         assert isinstance(manager.segmentation_strategy, VADSegmentationStrategy)
 
 
@@ -81,7 +83,7 @@ def test_vad_strategy_selection_import_error(stop_event):
     config.vad = VadConfig(enabled=True)
 
     with patch("faster_whisper.vad.get_vad_model", side_effect=ImportError):
-        manager = PipelineManager(config, stop_event)
+        manager = PipelineManager(config, stop_event, Mock(spec=DaemonStateManager))
         assert isinstance(manager.segmentation_strategy, FixedSegmentationStrategy)
 
 
@@ -90,7 +92,7 @@ def test_fixed_strategy_selection(stop_event):
     config = AppConfig.model_construct()
     config.vad = VadConfig(enabled=False)
 
-    manager = PipelineManager(config, stop_event)
+    manager = PipelineManager(config, stop_event, Mock(spec=DaemonStateManager))
     assert isinstance(manager.segmentation_strategy, FixedSegmentationStrategy)
 
 
@@ -126,3 +128,36 @@ async def test_start_raises_error_on_model_load_failure(pipeline_manager):
 
     with pytest.raises(RuntimeError, match="Failed to load Whisper model"):
         await pipeline_manager.start()
+
+
+@pytest.mark.asyncio
+async def test_auto_disable_monitor(pipeline_manager):
+    """Test that the auto-disable monitor stops transcription and updates state."""
+    # Manually start the task since we aren't calling pipeline_manager.start()
+    pipeline_manager._auto_disable_task = asyncio.create_task(
+        pipeline_manager._monitor_auto_disable()
+    )
+
+    # Setup
+    pipeline_manager._auto_disable_event.set()
+
+    # Wait briefly for the background task to react
+    # We use wait_for to ensure the test doesn't hang if logic is broken
+    try:
+        await asyncio.wait_for(pipeline_manager._auto_disable_task, timeout=0.1)
+    except asyncio.TimeoutError:
+        pass  # Expected, as the loop continues running
+    except asyncio.CancelledError:
+        pass
+
+    # Verification
+    pipeline_manager.output_handler.reset_spacing_state.assert_called()
+    pipeline_manager.state_manager.set_state.assert_called_with(DaemonStateEnum.IDLE)
+    assert not pipeline_manager._auto_disable_event.is_set()
+
+    # Cleanup task
+    pipeline_manager._auto_disable_task.cancel()
+    try:
+        await pipeline_manager._auto_disable_task
+    except asyncio.CancelledError:
+        pass

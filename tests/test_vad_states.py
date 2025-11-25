@@ -1,4 +1,5 @@
 import asyncio
+import time
 from unittest.mock import AsyncMock, Mock
 
 import numpy as np
@@ -9,6 +10,7 @@ from handsfreed.segmentation.vad import (
     EndingSpeechState,
     AbstractVADState,
 )
+from handsfreed.ipc_models import CliOutputMode
 
 
 @pytest.fixture
@@ -19,8 +21,11 @@ def strategy_mock():
     strategy.vad_config.neg_threshold = 0.3
     strategy.vad_config.max_speech_duration_s = 10.0
     strategy.vad_config.min_silence_duration_ms = 100
+    strategy.vad_config.auto_disable_duration_s = 0.0
     strategy._pre_roll_buffer = [np.ones(512)]
     strategy._current_segment = []
+    strategy.auto_disable_event = asyncio.Event()
+    strategy._active_mode = CliOutputMode.KEYBOARD
     return strategy
 
 
@@ -99,3 +104,63 @@ async def test_ending_speech_state_silence_timeout(strategy_mock):
     new_state = await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
     assert isinstance(new_state, SilentState)
     strategy_mock._finalize_segment.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_silent_state_auto_disable(strategy_mock):
+    """Test SilentState triggers auto-disable event after timeout."""
+    strategy_mock.vad_config.auto_disable_duration_s = 0.1
+    state = SilentState()
+
+    # Initial state, should not trigger yet
+    await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
+    assert not strategy_mock.auto_disable_event.is_set()
+
+    # Wait for timeout
+    await asyncio.sleep(0.15)
+
+    # Should trigger now
+    await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
+    assert strategy_mock.auto_disable_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_silent_state_no_auto_disable_when_disabled(strategy_mock):
+    """Test SilentState does not trigger auto-disable when config is 0."""
+    strategy_mock.vad_config.auto_disable_duration_s = 0.0
+    state = SilentState()
+
+    await asyncio.sleep(0.1)
+    await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
+    assert not strategy_mock.auto_disable_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_silent_state_no_auto_disable_when_inactive(strategy_mock):
+    """Test SilentState does not trigger auto-disable when not active."""
+    strategy_mock.vad_config.auto_disable_duration_s = 0.1
+    strategy_mock._active_mode = None  # Not active
+    state = SilentState()
+
+    await asyncio.sleep(0.15)
+    await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
+    assert not strategy_mock.auto_disable_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_silent_state_resets_timer(strategy_mock):
+    """Test SilentState resets timer after triggering."""
+    strategy_mock.vad_config.auto_disable_duration_s = 0.1
+    state = SilentState()
+
+    # Trigger once
+    await asyncio.sleep(0.15)
+    await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
+    assert strategy_mock.auto_disable_event.is_set()
+
+    # Reset event manually to test next trigger
+    strategy_mock.auto_disable_event.clear()
+
+    # Immediate next call should NOT trigger (timer was reset)
+    await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
+    assert not strategy_mock.auto_disable_event.is_set()

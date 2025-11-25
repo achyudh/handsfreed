@@ -52,6 +52,9 @@ pre_roll_duration_ms = 192
 # Maximum speech duration in seconds (0 = unlimited)
 max_speech_duration_s = 0.0
 
+# Maximum duration in seconds before listening stops (0 = disabled)
+auto_disable_duration_s = 5.0
+
 [output]
 # Command to execute for keyboard output
 keyboard_command = "wtype -"

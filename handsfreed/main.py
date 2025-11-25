@@ -43,7 +43,7 @@ async def main() -> int:
 
     # Create pipeline manager
     try:
-        pipeline_manager = PipelineManager(config, stop_event)
+        pipeline_manager = PipelineManager(config, stop_event, state_manager)
         await pipeline_manager.start()
     except Exception as e:
         logger.exception(f"Failed to start pipeline manager: {e}")
