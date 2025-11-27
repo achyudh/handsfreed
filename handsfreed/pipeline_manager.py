@@ -7,6 +7,7 @@ from .config import AppConfig
 from .output_handler import OutputHandler
 from .segmentation import create_segmentation_strategy
 from .transcriber import Transcriber
+from .task_assembler import TaskAssembler
 from .ipc_models import CliOutputMode
 from .state import DaemonStateEnum, DaemonStateManager
 
@@ -33,12 +34,16 @@ class PipelineManager:
 
         # Create processing queues
         self.raw_audio_queue = asyncio.Queue()
+        self.segment_queue = asyncio.Queue()
         self.transcription_queue = asyncio.Queue()
         self.output_queue = asyncio.Queue()
 
         # Create component instances
         self.audio_capture = AudioCapture(
             self.raw_audio_queue, self.config.audio, self.stop_event
+        )
+        self.task_assembler = TaskAssembler(
+            self.segment_queue, self.transcription_queue, self.stop_event
         )
         self.transcriber = Transcriber(
             self.config,
@@ -54,7 +59,7 @@ class PipelineManager:
         self.segmentation_strategy = create_segmentation_strategy(
             self.config,
             self.raw_audio_queue,
-            self.transcription_queue,
+            self.segment_queue,
             self.stop_event,
             self._auto_disable_event,
         )
@@ -67,6 +72,7 @@ class PipelineManager:
 
         # Start pipeline components
         await self.transcriber.start()
+        await self.task_assembler.start()
         await self.output_handler.start()
         await self.segmentation_strategy.start()
         await self.audio_capture.start()
@@ -86,6 +92,7 @@ class PipelineManager:
 
         await self.audio_capture.stop()
         await self.segmentation_strategy.stop()
+        await self.task_assembler.stop()
         await self.transcriber.stop()
         await self.output_handler.stop()
 
@@ -113,11 +120,13 @@ class PipelineManager:
     async def start_transcription(self, mode: CliOutputMode):
         """Start the transcription process."""
         await self.audio_capture.start_capture()
-        await self.segmentation_strategy.set_active_output_mode(mode)
+        self.task_assembler.set_output_mode(mode)
+        await self.segmentation_strategy.set_enabled(True)
         self.output_handler.reset_spacing_state()
 
     async def stop_transcription(self):
         """Stop the transcription process."""
-        await self.segmentation_strategy.set_active_output_mode(None)
+        await self.segmentation_strategy.set_enabled(False)
+        self.task_assembler.set_output_mode(None)
         await self.audio_capture.stop_capture()
         self.output_handler.reset_spacing_state()

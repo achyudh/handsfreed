@@ -11,9 +11,7 @@ import numpy as np
 
 from ..audio_capture import AUDIO_DTYPE, FRAME_SIZE, SAMPLE_RATE
 import abc
-from ..pipeline import TranscriptionTask
 from .strategy import SegmentationStrategy
-from ..ipc_models import CliOutputMode
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +49,7 @@ class SilentState(AbstractVADState):
     ) -> "AbstractVADState":
         """Handle VAD result in SILENT state."""
         # If we are not actively listening, ensure timer is reset
-        if strategy._active_mode is None:
+        if not strategy._enabled:
             self._entry_time = None
             return self
 
@@ -154,7 +152,7 @@ class VADSegmentationStrategy(SegmentationStrategy):
     def __init__(
         self,
         raw_audio_queue: asyncio.Queue,
-        transcription_queue: asyncio.Queue,
+        segment_queue: asyncio.Queue,
         stop_event: asyncio.Event,
         config,
         vad_model,
@@ -164,13 +162,13 @@ class VADSegmentationStrategy(SegmentationStrategy):
 
         Args:
             raw_audio_queue: Queue receiving raw audio frames from audio capture
-            transcription_queue: Queue to send audio segments to transcriber
+            segment_queue: Queue to send audio segments to task assembler
             stop_event: Event signaling when to stop processing
             config: Application configuration
             vad_model: Loaded VAD model instance
             auto_disable_event: Event to signal when auto-disable should occur
         """
-        super().__init__(raw_audio_queue, transcription_queue, stop_event, config)
+        super().__init__(raw_audio_queue, segment_queue, stop_event, config)
 
         self.vad_config = config.vad
         self.vad_model = vad_model
@@ -197,27 +195,27 @@ class VADSegmentationStrategy(SegmentationStrategy):
             f"Max Speech: {self.vad_config.max_speech_duration_s}s)"
         )
 
-    async def set_active_output_mode(self, mode: Optional[CliOutputMode]):
-        """Set the active output mode for transcription.
+    async def set_enabled(self, enabled: bool):
+        """Set the enabled state for segmentation.
 
-        This also triggers a reset of the VAD state if transcription is being stopped.
+        This also triggers a reset of the VAD state if disabled.
         """
-        # Call superclass method first to update _active_mode
-        await super().set_active_output_mode(mode)
+        # Call superclass method first to update _enabled
+        await super().set_enabled(enabled)
 
-        # If we are stopping transcription (mode becomes None), reset the VAD state
-        # This ensures the silence timer is fresh when transcription restarts.
-        if mode is None:
+        # If we are stopping (enabled becomes False), reset the VAD state
+        # This ensures the silence timer is fresh when it restarts.
+        if not enabled:
             self._current_vad_state = SilentState()
-            logger.debug("VAD state reset to SilentState due to transcription stop.")
+            logger.debug("VAD state reset to SilentState.")
 
     async def _consume_item(self, raw_frame: np.ndarray) -> None:
         """Process a single raw audio frame using VAD for speech detection."""
-        # Add frame to pre-roll buffer (regardless of active mode)
+        # Add frame to pre-roll buffer (regardless of enabled state)
         self._pre_roll_buffer.append(raw_frame)
 
-        # Only proceed with VAD if we have an active output mode
-        if self._active_mode is None:
+        # Only proceed with VAD if enabled
+        if not self._enabled:
             return
 
         # Run VAD model inference (in a thread to avoid blocking)
@@ -252,7 +250,7 @@ class VADSegmentationStrategy(SegmentationStrategy):
     async def _finalize_segment(self) -> None:
         """Finalize the current speech segment and send for transcription."""
         # Skip if no active output mode or empty segment
-        if self._active_mode is None or not self._current_segment:
+        if not self._enabled or not self._current_segment:
             self._current_segment = []
             return
 
@@ -278,8 +276,7 @@ class VADSegmentationStrategy(SegmentationStrategy):
         )
 
         # Create and send task
-        task = TranscriptionTask(audio=final_audio, output_mode=self._active_mode)
-        await self.output_queue.put(task)
+        await self.output_queue.put(final_audio)
 
         # Reset segment
         self._current_segment = []

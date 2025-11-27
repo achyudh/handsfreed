@@ -2,11 +2,9 @@
 
 import asyncio
 import logging
-from typing import Optional
 
 import numpy as np
 
-from ..ipc_models import CliOutputMode
 from ..pipeline import AbstractPipelineConsumerComponent
 
 logger = logging.getLogger(__name__)
@@ -18,7 +16,7 @@ class SegmentationStrategy(AbstractPipelineConsumerComponent):
     def __init__(
         self,
         raw_audio_queue: asyncio.Queue,
-        transcription_queue: asyncio.Queue,
+        segment_queue: asyncio.Queue,
         stop_event: asyncio.Event,
         config,
     ):
@@ -26,27 +24,26 @@ class SegmentationStrategy(AbstractPipelineConsumerComponent):
 
         Args:
             raw_audio_queue: Queue receiving raw audio frames from audio capture
-            transcription_queue: Queue to send audio segments to transcriber
+            segment_queue: Queue to send detected speech segments (np.ndarray)
             stop_event: Event signaling when to stop processing
             config: Application configuration
         """
-        super().__init__(raw_audio_queue, transcription_queue, stop_event)
+        super().__init__(raw_audio_queue, segment_queue, stop_event)
         self.config = config
 
         # Common state
         self._buffer = np.array([], dtype=np.float32)
-        self._active_mode: Optional[CliOutputMode] = None
+        self._enabled: bool = False
 
-    async def set_active_output_mode(self, mode: Optional[CliOutputMode]) -> None:
-        """Set the active output mode.
+    async def set_enabled(self, enabled: bool) -> None:
+        """Set the enabled state.
 
         Args:
-            mode: Output mode to use, or None to disable output
+            enabled: Whether the strategy should be processing audio.
         """
-        if mode != self._active_mode:
-            logger.info(f"Setting output mode to: {mode.value if mode else 'None'}")
-            self._active_mode = mode
+        if enabled != self._enabled:
+            logger.info(f"Setting segmentation enabled: {enabled}")
+            self._enabled = enabled
 
-            # Clear buffer when disabling output to avoid processing stale audio
-            if mode is None:
+            if not enabled:
                 self._buffer = np.array([], dtype=np.float32)

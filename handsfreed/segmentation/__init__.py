@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 def create_segmentation_strategy(
     config,
     raw_audio_queue,
-    transcription_queue,
+    segment_queue,
     stop_event,
     auto_disable_event=None,
 ):
@@ -26,7 +26,7 @@ def create_segmentation_strategy(
         logger.info("Using fixed-duration segmentation")
         return FixedSegmentationStrategy(
             raw_audio_queue,
-            transcription_queue,
+            segment_queue,
             stop_event,
             config,
         )
@@ -40,7 +40,7 @@ def create_segmentation_strategy(
         logger.info("Using VAD-based segmentation")
         return VADSegmentationStrategy(
             raw_audio_queue,
-            transcription_queue,
+            segment_queue,
             stop_event,
             config,
             vad_model,
@@ -58,7 +58,7 @@ def create_segmentation_strategy(
     # Fallback case
     return FixedSegmentationStrategy(
         raw_audio_queue,
-        transcription_queue,
+        segment_queue,
         stop_event,
         config,
     )

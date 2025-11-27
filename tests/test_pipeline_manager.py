@@ -36,6 +36,7 @@ async def pipeline_manager(mock_config, stop_event):
         patch("handsfreed.pipeline_manager.AudioCapture") as mock_audio,
         patch("handsfreed.pipeline_manager.Transcriber") as mock_trans,
         patch("handsfreed.pipeline_manager.OutputHandler") as mock_output,
+        patch("handsfreed.pipeline_manager.TaskAssembler") as mock_assembler,
         patch(
             "handsfreed.pipeline_manager.create_segmentation_strategy"
         ) as mock_create_strategy,
@@ -52,6 +53,8 @@ async def pipeline_manager(mock_config, stop_event):
         manager.transcriber.load_model = Mock(return_value=True)
         manager.output_handler = AsyncMock()
         manager.output_handler.reset_spacing_state = Mock()
+        manager.task_assembler = AsyncMock()
+        manager.task_assembler.set_output_mode = Mock()  # Synchronous method
         # The strategy is already mocked by the factory patch
         manager.segmentation_strategy = mock_segmentation_strategy
         yield manager
@@ -64,6 +67,7 @@ async def pipeline_manager_with_real_vad(mock_config, stop_event):
         patch("handsfreed.pipeline_manager.AudioCapture") as mock_audio,
         patch("handsfreed.pipeline_manager.Transcriber") as mock_trans,
         patch("handsfreed.pipeline_manager.OutputHandler") as mock_output,
+        patch("handsfreed.pipeline_manager.TaskAssembler") as mock_assembler,
         patch(
             "faster_whisper.vad.get_vad_model", return_value=Mock()
         ),  # Mock VAD model
@@ -80,7 +84,7 @@ async def pipeline_manager_with_real_vad(mock_config, stop_event):
         # Manually create the real segmentation strategy instance
         real_segmentation_strategy = VADSegmentationStrategy(
             raw_audio_queue=asyncio.Queue(),
-            transcription_queue=asyncio.Queue(),
+            segment_queue=asyncio.Queue(),
             stop_event=stop_event,
             config=mock_config,
             vad_model=Mock(),  # This will be replaced by the patch above
@@ -97,36 +101,42 @@ async def pipeline_manager_with_real_vad(mock_config, stop_event):
             manager.transcriber.load_model = Mock(return_value=True)
             manager.output_handler = AsyncMock()
             manager.output_handler.reset_spacing_state = Mock()
+            manager.task_assembler = AsyncMock()
+            manager.task_assembler.set_output_mode = Mock()  # Synchronous method
 
             yield manager
 
 
 @pytest.mark.asyncio
 async def test_start_transcription_resets_spacing_state(pipeline_manager):
-    """Test start_transcription resets spacing state."""
+    """Test start_transcription resets spacing state and configures components."""
     await pipeline_manager.start_transcription(CliOutputMode.KEYBOARD)
     pipeline_manager.output_handler.reset_spacing_state.assert_called_once()
+    pipeline_manager.task_assembler.set_output_mode.assert_called_with(
+        CliOutputMode.KEYBOARD
+    )
+    pipeline_manager.segmentation_strategy.set_enabled.assert_called_with(True)
 
 
 @pytest.mark.asyncio
 async def test_stop_transcription_resets_spacing_state(pipeline_manager):
-    """Test stop_transcription resets spacing state."""
+    """Test stop_transcription resets spacing state and stops components."""
     await pipeline_manager.stop_transcription()
     pipeline_manager.output_handler.reset_spacing_state.assert_called_once()
+    pipeline_manager.segmentation_strategy.set_enabled.assert_called_with(False)
+    pipeline_manager.task_assembler.set_output_mode.assert_called_with(None)
 
 
 @pytest.mark.asyncio
-async def test_set_active_output_mode_resets_vad_state(pipeline_manager_with_real_vad):
-    """Test that setting active output mode to None resets the VAD state."""
+async def test_set_enabled_false_resets_vad_state(pipeline_manager_with_real_vad):
+    """Test that setting enabled to False resets the VAD state."""
     # Simulate being in a speech state
     pipeline_manager_with_real_vad.segmentation_strategy._current_vad_state = (
         SpeechState()
     )
 
-    # Stop transcription
-    await pipeline_manager_with_real_vad.segmentation_strategy.set_active_output_mode(
-        None
-    )
+    # Stop transcription (disable segmentation)
+    await pipeline_manager_with_real_vad.segmentation_strategy.set_enabled(False)
 
     # Assert that the VAD state is reset to SilentState
     assert isinstance(
@@ -178,6 +188,7 @@ async def test_start_starts_components(pipeline_manager):
 
     pipeline_manager.transcriber.load_model.assert_called_once()
     pipeline_manager.transcriber.start.assert_awaited_once()
+    pipeline_manager.task_assembler.start.assert_awaited_once()
     pipeline_manager.output_handler.start.assert_awaited_once()
     pipeline_manager.segmentation_strategy.start.assert_awaited_once()
     pipeline_manager.audio_capture.start.assert_awaited_once()
@@ -190,6 +201,7 @@ async def test_stop_stops_components(pipeline_manager):
 
     pipeline_manager.audio_capture.stop.assert_awaited_once()
     pipeline_manager.segmentation_strategy.stop.assert_awaited_once()
+    pipeline_manager.task_assembler.stop.assert_awaited_once()
     pipeline_manager.transcriber.stop.assert_awaited_once()
     pipeline_manager.output_handler.stop.assert_awaited_once()
 
