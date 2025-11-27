@@ -64,6 +64,12 @@ async def test_start_success(audio_capture, mock_stream):
 
         assert audio_capture._stream is not None
         assert audio_capture._task is not None
+        # Should not start stream automatically
+        mock_stream.start.assert_not_called()
+
+        # Start capture explicitly
+        mock_stream.active = False
+        await audio_capture.start_capture()
         mock_stream.start.assert_called_once()
 
 
@@ -104,13 +110,22 @@ async def test_stream_error_handling(audio_capture):
     """Test handling of PortAudio errors."""
     mock_stream = MagicMock(spec=sd.InputStream)
     mock_stream.start.side_effect = sd.PortAudioError("Test error")
+    # Set active to false initially so start_capture tries to start it
+    mock_stream.active = False
 
     with patch("sounddevice.InputStream", return_value=mock_stream):
-        with pytest.raises(sd.PortAudioError, match="Test error"):
-            await audio_capture.start()
+        # Start initializes stream but doesn't call start() on it
+        await audio_capture.start()
 
-        assert audio_capture._stream is None
-        assert audio_capture._task is None
+        # This should catch the error internally and log it, but not raise
+        # (based on current implementation of start_capture which catches Exception)
+        await audio_capture.start_capture()
+
+        # Verify start was called
+        mock_stream.start.assert_called_once()
+
+        # Verify stream object still exists (it wasn't destroyed by start_capture error)
+        assert audio_capture._stream is not None
 
 
 @pytest.mark.asyncio
@@ -167,14 +182,23 @@ async def test_multiple_start_stop(audio_capture, mock_stream):
         # First cycle
         await audio_capture.start()
         assert audio_capture._stream is not None
+
+        # Start capture
+        mock_stream.active = False
+        await audio_capture.start_capture()
+        mock_stream.start.assert_called_once()
+
+        # Stop capture
+        mock_stream.active = True
+        await audio_capture.stop_capture()
+        mock_stream.stop.assert_called_once()
+        mock_stream.active = False  # Simulate stream stopped
+
+        # Stop component
         await audio_capture.stop()
         assert audio_capture._stream is None
 
-        # Second cycle
-        await audio_capture.start()
-        assert audio_capture._stream is not None
-        await audio_capture.stop()
-        assert audio_capture._stream is None
-
-        assert mock_stream.start.call_count == 2
-        assert mock_stream.stop.call_count == 2
+        # Verify calls (start called once per capture start, stop called once per capture stop)
+        assert mock_stream.start.call_count == 1
+        assert mock_stream.stop.call_count == 1
+        assert mock_stream.close.call_count == 1

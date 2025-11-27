@@ -107,6 +107,40 @@ class AudioCapture(AbstractPipelineProducerComponent):
         except queue.Empty:
             return None
 
+    async def start_capture(self) -> None:
+        """Start the actual audio recording stream."""
+        if self._stream is None:
+            logger.warning("Attempted to start capture but stream is not initialized.")
+            return
+
+        if self._stream.active:
+            logger.warning("Audio capture already active.")
+            return
+
+        try:
+            logger.info("Starting audio stream...")
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._stream.start)
+            logger.info("Audio stream started")
+        except Exception as e:
+            logger.error(f"Error starting audio stream: {e}")
+
+    async def stop_capture(self) -> None:
+        """Pause the audio recording stream."""
+        if self._stream is None:
+            return
+
+        if not self._stream.active:
+            return
+
+        try:
+            logger.info("Pausing audio stream...")
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._stream.stop)
+            logger.info("Audio stream paused")
+        except Exception as e:
+            logger.error(f"Error pausing audio stream: {e}")
+
     async def _on_start(self) -> None:
         """Start the sounddevice stream."""
         logger.info(f"Starting audio capture (Device: {self.device or 'Default'})")
@@ -120,7 +154,7 @@ class AudioCapture(AbstractPipelineProducerComponent):
                 break
 
         try:
-            # Start the sounddevice stream
+            # Initialize the sounddevice stream (but don't start it yet)
             self._stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
                 device=self.device,
@@ -131,11 +165,7 @@ class AudioCapture(AbstractPipelineProducerComponent):
                 blocksize=FRAME_SIZE,  # Small blocks for faster segmentation
             )
 
-            # Run potentially blocking stream start in executor
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._stream.start)
-
-            logger.info("Audio capture started")
+            logger.info("Audio capture initialized (stream ready)")
 
         except sd.PortAudioError as e:
             logger.error(f"PortAudio error starting audio stream: {e}")
@@ -155,7 +185,8 @@ class AudioCapture(AbstractPipelineProducerComponent):
             try:
                 # Run potentially blocking stream stop/close in executor
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self._stream.stop)
+                if self._stream.active:
+                    await loop.run_in_executor(None, self._stream.stop)
                 await loop.run_in_executor(None, self._stream.close)
                 logger.info("Audio stream stopped and closed")
             except sd.PortAudioError as e:

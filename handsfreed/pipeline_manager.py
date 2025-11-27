@@ -101,9 +101,7 @@ class PipelineManager:
                     "Auto-disable triggered by segmentation strategy due to prolonged silence."
                 )
                 await self.stop_transcription()
-                self.state_manager.set_state(
-                    DaemonStateEnum.IDLE
-                )
+                self.state_manager.set_state(DaemonStateEnum.IDLE)
                 self._auto_disable_event.clear()
 
             except asyncio.CancelledError:
@@ -114,10 +112,12 @@ class PipelineManager:
 
     async def start_transcription(self, mode: CliOutputMode):
         """Start the transcription process."""
+        await self.audio_capture.start_capture()
         await self.segmentation_strategy.set_active_output_mode(mode)
         self.output_handler.reset_spacing_state()
 
     async def stop_transcription(self):
         """Stop the transcription process."""
         await self.segmentation_strategy.set_active_output_mode(None)
+        await self.audio_capture.stop_capture()
         self.output_handler.reset_spacing_state()
