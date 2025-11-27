@@ -13,6 +13,7 @@ from ..audio_capture import AUDIO_DTYPE, FRAME_SIZE, SAMPLE_RATE
 import abc
 from ..pipeline import TranscriptionTask
 from .strategy import SegmentationStrategy
+from ..ipc_models import CliOutputMode
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ class SilentState(AbstractVADState):
 
     def __init__(self):
         """Initialize the state."""
-        self._entry_time = time.monotonic()
+        self._entry_time = None
 
     async def handle_vad_result(
         self,
@@ -49,6 +50,15 @@ class SilentState(AbstractVADState):
         raw_frame: np.ndarray,
     ) -> "AbstractVADState":
         """Handle VAD result in SILENT state."""
+        # If we are not actively listening, ensure timer is reset
+        if strategy._active_mode is None:
+            self._entry_time = None
+            return self
+
+        # Lazy initialization of the timer on first active frame
+        if self._entry_time is None:
+            self._entry_time = time.monotonic()
+
         if speech_prob >= strategy.vad_config.threshold:
             logger.debug(f"VAD: SILENT -> SPEECH (speech_prob={speech_prob})")
             # Add pre-roll buffer content to current segment
@@ -59,7 +69,6 @@ class SilentState(AbstractVADState):
         if (
             strategy.auto_disable_event
             and strategy.vad_config.auto_disable_duration_s > 0
-            and strategy._active_mode is not None
         ):
             elapsed = time.monotonic() - self._entry_time
             if elapsed >= strategy.vad_config.auto_disable_duration_s:
@@ -187,6 +196,20 @@ class VADSegmentationStrategy(SegmentationStrategy):
             f"Pre-roll: {self.vad_config.pre_roll_duration_ms}ms, "
             f"Max Speech: {self.vad_config.max_speech_duration_s}s)"
         )
+
+    async def set_active_output_mode(self, mode: Optional[CliOutputMode]):
+        """Set the active output mode for transcription.
+
+        This also triggers a reset of the VAD state if transcription is being stopped.
+        """
+        # Call superclass method first to update _active_mode
+        await super().set_active_output_mode(mode)
+
+        # If we are stopping transcription (mode becomes None), reset the VAD state
+        # This ensures the silence timer is fresh when transcription restarts.
+        if mode is None:
+            self._current_vad_state = SilentState()
+            logger.debug("VAD state reset to SilentState due to transcription stop.")
 
     async def _consume_item(self, raw_frame: np.ndarray) -> None:
         """Process a single raw audio frame using VAD for speech detection."""

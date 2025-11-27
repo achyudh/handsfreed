@@ -130,6 +130,9 @@ async def test_silent_state_no_auto_disable_when_disabled(strategy_mock):
     strategy_mock.vad_config.auto_disable_duration_s = 0.0
     state = SilentState()
 
+    # Initialize timer
+    await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
+
     await asyncio.sleep(0.1)
     await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
     assert not strategy_mock.auto_disable_event.is_set()
@@ -152,6 +155,9 @@ async def test_silent_state_resets_timer(strategy_mock):
     """Test SilentState resets timer after triggering."""
     strategy_mock.vad_config.auto_disable_duration_s = 0.1
     state = SilentState()
+
+    # Initialize timer
+    await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
 
     # Trigger once
     await asyncio.sleep(0.15)
