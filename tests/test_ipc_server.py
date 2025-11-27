@@ -242,3 +242,58 @@ async def test_invalid_command(ipc_server, socket_path):
 
     assert response["response_type"] == "error"
     assert "Invalid command format" in response["message"]
+
+
+@pytest.mark.asyncio
+async def test_toggle_command_idle_to_listening(
+    ipc_server, socket_path, state_manager, pipeline_manager
+):
+    """Test Toggle command when Idle -> starts listening."""
+    await ipc_server.start()
+    state_manager.set_state(DaemonStateEnum.IDLE)
+
+    # Send Toggle command with no output mode (default)
+    response = await send_command_get_response(
+        socket_path, {"command": "toggle", "output_mode": None}
+    )
+
+    assert response["response_type"] == "ack"
+    assert state_manager.current_state == DaemonStateEnum.LISTENING
+    # Should default to keyboard if None provided
+    pipeline_manager.start_transcription.assert_awaited_with(CliOutputMode.KEYBOARD)
+
+
+@pytest.mark.asyncio
+async def test_toggle_command_listening_to_idle(
+    ipc_server, socket_path, state_manager, pipeline_manager
+):
+    """Test Toggle command when Listening -> stops listening."""
+    await ipc_server.start()
+    state_manager.set_state(DaemonStateEnum.LISTENING)
+
+    # Send Toggle command
+    response = await send_command_get_response(
+        socket_path, {"command": "toggle", "output_mode": None}
+    )
+
+    assert response["response_type"] == "ack"
+    assert state_manager.current_state == DaemonStateEnum.IDLE
+    pipeline_manager.stop_transcription.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_toggle_command_with_output_mode(
+    ipc_server, socket_path, state_manager, pipeline_manager
+):
+    """Test Toggle command starts with specific output mode."""
+    await ipc_server.start()
+    state_manager.set_state(DaemonStateEnum.IDLE)
+
+    # Send Toggle command with clipboard mode
+    response = await send_command_get_response(
+        socket_path, {"command": "toggle", "output_mode": "clipboard"}
+    )
+
+    assert response["response_type"] == "ack"
+    assert state_manager.current_state == DaemonStateEnum.LISTENING
+    pipeline_manager.start_transcription.assert_awaited_with(CliOutputMode.CLIPBOARD)

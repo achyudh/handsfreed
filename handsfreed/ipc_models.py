@@ -37,9 +37,30 @@ class ShutdownCommand(BaseModel):
     command: Literal["shutdown"] = "shutdown"
 
 
+class ToggleCommand(BaseModel):
+    """Command to toggle transcription state."""
+
+    command: Literal["toggle"] = "toggle"
+    # Optional output mode. If None, uses default/current.
+    output_mode: Optional[CliOutputMode] = None
+
+
+class SubscribeCommand(BaseModel):
+    """Command to subscribe to state change events."""
+
+    command: Literal["subscribe"] = "subscribe"
+
+
 # Use discriminated union for command parsing
 DaemonCommand = Annotated[
-    Union[StartCommand, StopCommand, StatusCommand, ShutdownCommand],
+    Union[
+        StartCommand,
+        StopCommand,
+        StatusCommand,
+        ShutdownCommand,
+        ToggleCommand,
+        SubscribeCommand,
+    ],
     Field(discriminator="command"),
 ]
 
@@ -85,9 +106,16 @@ class ErrorResponse(BaseModel):
     message: str
 
 
+class StateNotification(BaseModel):
+    """Notification broadcast when daemon state changes."""
+
+    response_type: Literal["state_change"] = "state_change"
+    status: DaemonStateModel
+
+
 # Use discriminated union for response serialization
 DaemonResponse = Annotated[
-    Union[AckResponse, StatusResponse, ErrorResponse],
+    Union[AckResponse, StatusResponse, ErrorResponse, StateNotification],
     Field(discriminator="response_type"),
 ]
 
@@ -130,6 +158,7 @@ class ResponseWrapper(RootModel[DaemonResponse]):
             "ack": AckResponse,
             "status": StatusResponse,
             "error": ErrorResponse,
+            "state_change": StateNotification,
         }
 
         if response_type not in response_types:

@@ -10,15 +10,19 @@ from pydantic import ValidationError
 
 from .ipc_models import (
     AckResponse,
+    CliOutputMode,
     CommandWrapper,
     DaemonStateModel,
     ErrorResponse,
     ResponseWrapper,
     ShutdownCommand,
     StartCommand,
+    StateNotification,
     StatusCommand,
     StatusResponse,
     StopCommand,
+    SubscribeCommand,
+    ToggleCommand,
 )
 from .pipeline_manager import PipelineManager
 from .state import DaemonStateEnum, DaemonStateManager
@@ -55,6 +59,48 @@ class IPCServer:
 
         self._server: Optional[asyncio.Server] = None
         self._client_tasks: Set[asyncio.Task] = set()
+        self._subscribers: Set[asyncio.StreamWriter] = set()
+
+        # Register for state updates
+        self.state_manager.add_observer(self._on_state_change)
+
+    def _on_state_change(
+        self, new_state: DaemonStateEnum, error: Optional[str]
+    ) -> None:
+        """Handle state change notifications."""
+        if not self._subscribers:
+            return
+
+        try:
+            state_model = DaemonStateModel(state=new_state, last_error=error)
+            notification = ResponseWrapper(root=StateNotification(status=state_model))
+
+            # Create tasks for broadcasting to avoid blocking
+            asyncio.create_task(self._broadcast_notification(notification))
+        except Exception as e:
+            logger.error(f"Error preparing state notification: {e}")
+
+    async def _broadcast_notification(self, notification: ResponseWrapper) -> None:
+        """Broadcast a notification to all subscribers."""
+        if not self._subscribers:
+            return
+
+        data = notification.model_dump_json().encode("utf-8") + MESSAGE_TERMINATOR
+
+        # Copy set to avoid modification during iteration
+        subscribers = list(self._subscribers)
+
+        for writer in subscribers:
+            if writer.is_closing():
+                self._subscribers.discard(writer)
+                continue
+
+            try:
+                writer.write(data)
+                await writer.drain()
+            except Exception as e:
+                logger.warning(f"Error broadcasting to subscriber: {e}")
+                self._subscribers.discard(writer)
 
     async def _send_response(
         self, writer: asyncio.StreamWriter, response: ResponseWrapper
@@ -148,6 +194,75 @@ class IPCServer:
         # Signal shutdown
         self.shutdown_event.set()
 
+    async def _handle_toggle_command(
+        self, writer: asyncio.StreamWriter, command: ToggleCommand
+    ) -> None:
+        """Handle Toggle command.
+
+        Args:
+            writer: StreamWriter to send response through
+            command: Toggle command with optional output mode
+        """
+        logger.info(f"Handling Toggle command (Output: {command.output_mode})")
+
+        current_state = self.state_manager.current_state
+
+        if current_state == DaemonStateEnum.IDLE:
+            # Start
+            # If output mode is None, use default (KEYBOARD)
+            mode = command.output_mode or CliOutputMode.KEYBOARD
+            try:
+                await self.pipeline_manager.start_transcription(mode)
+                self.state_manager.set_state(DaemonStateEnum.LISTENING)
+                await self._send_response(writer, ResponseWrapper(root=AckResponse()))
+            except Exception as e:
+                error_msg = f"Failed to toggle start: {e}"
+                logger.exception(error_msg)
+                self.state_manager.set_error(error_msg)
+                await self._send_response(
+                    writer, ResponseWrapper(root=ErrorResponse(message=error_msg))
+                )
+
+        elif current_state in (DaemonStateEnum.LISTENING, DaemonStateEnum.PROCESSING):
+            # Stop
+            try:
+                await self.pipeline_manager.stop_transcription()
+                self.state_manager.set_state(DaemonStateEnum.IDLE)
+                await self._send_response(writer, ResponseWrapper(root=AckResponse()))
+            except Exception as e:
+                error_msg = f"Failed to toggle stop: {e}"
+                logger.exception(error_msg)
+                self.state_manager.set_error(error_msg)
+                await self._send_response(
+                    writer, ResponseWrapper(root=ErrorResponse(message=error_msg))
+                )
+        else:
+            # Error state
+            error_msg = f"Cannot toggle from state: {current_state}"
+            await self._send_response(
+                writer, ResponseWrapper(root=ErrorResponse(message=error_msg))
+            )
+
+    async def _handle_subscribe_command(self, writer: asyncio.StreamWriter) -> bool:
+        """Handle Subscribe command.
+
+        Args:
+            writer: StreamWriter to subscribe
+
+        Returns:
+            True indicating the client is now subscribed
+        """
+        logger.info("Handling Subscribe command")
+        self._subscribers.add(writer)
+
+        # Send initial status immediately
+        state, error = self.state_manager.get_status()
+        state_model = DaemonStateModel(state=state, last_error=error)
+        notification = ResponseWrapper(root=StateNotification(status=state_model))
+        await self._send_response(writer, notification)
+
+        return True
+
     async def _handle_command(self, writer: asyncio.StreamWriter, message: str) -> bool:
         """Parse and handle a command message.
 
@@ -174,6 +289,12 @@ class IPCServer:
             elif isinstance(command.root, ShutdownCommand):
                 await self._handle_shutdown_command(writer)
                 return False
+            elif isinstance(command.root, ToggleCommand):
+                await self._handle_toggle_command(writer, command.root)
+                return True
+            elif isinstance(command.root, SubscribeCommand):
+                await self._handle_subscribe_command(writer)
+                return True
             else:
                 logger.error(f"Unhandled command type: {type(command.root)}")
                 await self._send_response(
@@ -232,9 +353,12 @@ class IPCServer:
         try:
             while True:
                 try:
+                    # Determine timeout based on subscription status
+                    timeout = None if writer in self._subscribers else 5.0
+
                     # Read a line (command should end with newline)
                     data = await asyncio.wait_for(
-                        reader.readuntil(MESSAGE_TERMINATOR), timeout=5.0
+                        reader.readuntil(MESSAGE_TERMINATOR), timeout=timeout
                     )
 
                     if not data:  # EOF
@@ -251,13 +375,19 @@ class IPCServer:
                         break
 
                 except asyncio.TimeoutError:
-                    logger.warning(f"Timeout reading from client {peer}")
-                    break
+                    if writer not in self._subscribers:
+                        logger.warning(f"Timeout reading from client {peer}")
+                        break
+                    # If subscribed, timeout is None, so this shouldn't happen,
+                    # but safety check.
                 except asyncio.IncompleteReadError:
                     logger.info(f"Client disconnected (incomplete read): {peer}")
                     break
                 except ConnectionError as e:
                     logger.warning(f"Connection error with {peer}: {e}")
+                    break
+                except asyncio.CancelledError:
+                    logger.info(f"Client connection cancelled: {peer}")
                     break
                 except Exception as e:
                     logger.exception(f"Error handling client {peer}: {e}")
@@ -320,6 +450,14 @@ class IPCServer:
             return
 
         logger.info("Stopping IPC server...")
+
+        # Explicitly close subscriber connections first to unblock their read loops
+        if self._subscribers:
+            logger.info(f"Closing {len(self._subscribers)} subscriber connections...")
+            for writer in self._subscribers:
+                if not writer.is_closing():
+                    writer.close()
+            self._subscribers.clear()
 
         # Stop any active processing
         if self.state_manager.current_state != DaemonStateEnum.IDLE:
