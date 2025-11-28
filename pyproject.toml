@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "handsfreed"
-version = "0.1.0"
+version = "0.2.0"
 description = "Handsfree speech-to-text daemon for Linux"
 authors = [{ name = "Achyudh Ram", email = "mail@achyudh.me" }]
 readme = "README.md"
