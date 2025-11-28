@@ -24,8 +24,8 @@ def strategy_mock():
     strategy.vad_config.auto_disable_duration_s = 0.0
     strategy._pre_roll_buffer = [np.ones(512)]
     strategy._current_segment = []
-    strategy.auto_disable_event = asyncio.Event()
-    strategy._active_mode = CliOutputMode.KEYBOARD
+    strategy.on_auto_disable = Mock()
+    strategy._enabled = True
     return strategy
 
 
@@ -108,20 +108,20 @@ async def test_ending_speech_state_silence_timeout(strategy_mock):
 
 @pytest.mark.asyncio
 async def test_silent_state_auto_disable(strategy_mock):
-    """Test SilentState triggers auto-disable event after timeout."""
+    """Test SilentState triggers auto-disable callback after timeout."""
     strategy_mock.vad_config.auto_disable_duration_s = 0.1
     state = SilentState()
 
     # Initial state, should not trigger yet
     await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
-    assert not strategy_mock.auto_disable_event.is_set()
+    strategy_mock.on_auto_disable.assert_not_called()
 
     # Wait for timeout
     await asyncio.sleep(0.15)
 
     # Should trigger now
     await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
-    assert strategy_mock.auto_disable_event.is_set()
+    strategy_mock.on_auto_disable.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -135,19 +135,19 @@ async def test_silent_state_no_auto_disable_when_disabled(strategy_mock):
 
     await asyncio.sleep(0.1)
     await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
-    assert not strategy_mock.auto_disable_event.is_set()
+    strategy_mock.on_auto_disable.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_silent_state_no_auto_disable_when_inactive(strategy_mock):
-    """Test SilentState does not trigger auto-disable when not active."""
+async def test_silent_state_no_auto_disable_when_not_enabled(strategy_mock):
+    """Test SilentState does not trigger auto-disable when not enabled."""
     strategy_mock.vad_config.auto_disable_duration_s = 0.1
-    strategy_mock._active_mode = None  # Not active
+    strategy_mock._enabled = False
     state = SilentState()
 
     await asyncio.sleep(0.15)
     await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
-    assert not strategy_mock.auto_disable_event.is_set()
+    strategy_mock.on_auto_disable.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -162,11 +162,11 @@ async def test_silent_state_resets_timer(strategy_mock):
     # Trigger once
     await asyncio.sleep(0.15)
     await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
-    assert strategy_mock.auto_disable_event.is_set()
+    strategy_mock.on_auto_disable.assert_called_once()
 
-    # Reset event manually to test next trigger
-    strategy_mock.auto_disable_event.clear()
+    # Reset mock to test next trigger
+    strategy_mock.on_auto_disable.reset_mock()
 
     # Immediate next call should NOT trigger (timer was reset)
     await state.handle_vad_result(strategy_mock, 0.2, np.ones(512))
-    assert not strategy_mock.auto_disable_event.is_set()
+    strategy_mock.on_auto_disable.assert_not_called()

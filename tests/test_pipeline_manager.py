@@ -88,7 +88,7 @@ async def pipeline_manager_with_real_vad(mock_config, stop_event):
             stop_event=stop_event,
             config=mock_config,
             vad_model=Mock(),  # This will be replaced by the patch above
-            auto_disable_event=asyncio.Event(),
+            on_auto_disable=AsyncMock(),
         )
 
         with patch(
@@ -216,33 +216,17 @@ async def test_start_raises_error_on_model_load_failure(pipeline_manager):
 
 
 @pytest.mark.asyncio
-async def test_auto_disable_monitor(pipeline_manager):
-    """Test that the auto-disable monitor stops transcription and updates state."""
-    # Manually start the task since we aren't calling pipeline_manager.start()
-    pipeline_manager._auto_disable_task = asyncio.create_task(
-        pipeline_manager._monitor_auto_disable()
-    )
-
-    # Setup
-    pipeline_manager._auto_disable_event.set()
-
-    # Wait briefly for the background task to react
-    # We use wait_for to ensure the test doesn't hang if logic is broken
-    try:
-        await asyncio.wait_for(pipeline_manager._auto_disable_task, timeout=0.1)
-    except asyncio.TimeoutError:
-        pass  # Expected, as the loop continues running
-    except asyncio.CancelledError:
-        pass
+async def test_handle_auto_disable(pipeline_manager):
+    """Test that the auto-disable callback stops transcription and updates state."""
+    # Execute the callback directly
+    await pipeline_manager._handle_auto_disable()
 
     # Verification
+    # Since stop_transcription calls output_handler.reset_spacing_state, we check that
     pipeline_manager.output_handler.reset_spacing_state.assert_called()
+    # Check that state was set to IDLE
     pipeline_manager.state_manager.set_state.assert_called_with(DaemonStateEnum.IDLE)
-    assert not pipeline_manager._auto_disable_event.is_set()
-
-    # Cleanup task
-    pipeline_manager._auto_disable_task.cancel()
-    try:
-        await pipeline_manager._auto_disable_task
-    except asyncio.CancelledError:
-        pass
+    # Ensure stop_transcription components were called
+    pipeline_manager.segmentation_strategy.set_enabled.assert_called_with(False)
+    pipeline_manager.task_assembler.set_output_mode.assert_called_with(None)
+    pipeline_manager.audio_capture.stop_capture.assert_called()

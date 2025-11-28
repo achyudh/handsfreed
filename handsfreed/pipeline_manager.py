@@ -29,9 +29,6 @@ class PipelineManager:
         self.stop_event = stop_event
         self.state_manager = state_manager
 
-        self._auto_disable_event = asyncio.Event()
-        self._auto_disable_task: Optional[asyncio.Task] = None
-
         # Create processing queues
         self.raw_audio_queue = asyncio.Queue()
         self.segment_queue = asyncio.Queue()
@@ -61,7 +58,7 @@ class PipelineManager:
             self.raw_audio_queue,
             self.segment_queue,
             self.stop_event,
-            self._auto_disable_event,
+            on_auto_disable=self._handle_auto_disable,
         )
 
     async def start(self):
@@ -78,44 +75,23 @@ class PipelineManager:
         await self.audio_capture.start()
 
         # Start auto-disable monitor task
-        self._auto_disable_task = asyncio.create_task(self._monitor_auto_disable())
 
     async def stop(self):
         """Stop the pipeline components."""
-        # Cancel auto-disable monitor task
-        if self._auto_disable_task:
-            self._auto_disable_task.cancel()
-            try:
-                await self._auto_disable_task
-            except asyncio.CancelledError:
-                pass
-
         await self.audio_capture.stop()
         await self.segmentation_strategy.stop()
         await self.task_assembler.stop()
         await self.transcriber.stop()
         await self.output_handler.stop()
 
-    async def _monitor_auto_disable(self):
-        """Monitor for auto-disable events from segmentation strategy."""
-        while not self.stop_event.is_set():
-            try:
-                await self._auto_disable_event.wait()
-                if self.stop_event.is_set():
-                    break
+    async def _handle_auto_disable(self):
+        """Callback to handle auto-disable triggered by segmentation strategy."""
+        if self.stop_event.is_set():
+            return
 
-                logger.info(
-                    "Auto-disable triggered by segmentation strategy due to prolonged silence."
-                )
-                await self.stop_transcription()
-                self.state_manager.set_state(DaemonStateEnum.IDLE)
-                self._auto_disable_event.clear()
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error in auto-disable monitor: {e}")
-                await asyncio.sleep(1)
+        logger.info("Auto-disable triggered by segmentation strategy.")
+        await self.stop_transcription()
+        self.state_manager.set_state(DaemonStateEnum.IDLE)
 
     async def start_transcription(self, mode: CliOutputMode):
         """Start the transcription process."""

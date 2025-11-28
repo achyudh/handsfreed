@@ -5,7 +5,7 @@ import collections
 import enum
 import logging
 import time
-from typing import Deque, List, Optional
+from typing import Deque, List, Optional, Callable, Awaitable
 
 import numpy as np
 
@@ -64,16 +64,16 @@ class SilentState(AbstractVADState):
                 strategy._current_segment.append(pre_frame)
             return SpeechState()
 
-        if (
-            strategy.auto_disable_event
-            and strategy.vad_config.auto_disable_duration_s > 0
-        ):
+        if strategy.on_auto_disable and strategy.vad_config.auto_disable_duration_s > 0:
             elapsed = time.monotonic() - self._entry_time
             if elapsed >= strategy.vad_config.auto_disable_duration_s:
                 logger.info(f"VAD: Auto-disabling after {elapsed:.1f}s of silence")
-                if strategy.auto_disable_event is not None:
-                    strategy.auto_disable_event.set()
-                # Reset timer to avoid spamming the event while waiting for shutdown
+
+                if asyncio.iscoroutinefunction(strategy.on_auto_disable):
+                    asyncio.create_task(strategy.on_auto_disable())
+                else:
+                    strategy.on_auto_disable()
+
                 self._entry_time = time.monotonic()
 
         return self
@@ -156,7 +156,7 @@ class VADSegmentationStrategy(SegmentationStrategy):
         stop_event: asyncio.Event,
         config,
         vad_model,
-        auto_disable_event: Optional[asyncio.Event] = None,
+        on_auto_disable: Optional[Callable[[], Awaitable[None]]] = None,
     ):
         """Initialize VAD-based segmentation strategy.
 
@@ -166,13 +166,13 @@ class VADSegmentationStrategy(SegmentationStrategy):
             stop_event: Event signaling when to stop processing
             config: Application configuration
             vad_model: Loaded VAD model instance
-            auto_disable_event: Event to signal when auto-disable should occur
+            on_auto_disable: Callback to invoke when auto-disable should occur
         """
         super().__init__(raw_audio_queue, segment_queue, stop_event, config)
 
         self.vad_config = config.vad
         self.vad_model = vad_model
-        self.auto_disable_event = auto_disable_event
+        self.on_auto_disable = on_auto_disable
 
         # Initialize state
         self._current_vad_state: AbstractVADState = SilentState()

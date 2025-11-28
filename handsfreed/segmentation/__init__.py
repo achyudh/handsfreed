@@ -19,7 +19,7 @@ def create_segmentation_strategy(
     raw_audio_queue,
     segment_queue,
     stop_event,
-    auto_disable_event=None,
+    on_auto_disable=None,
 ):
     """Factory function to create the appropriate segmentation strategy."""
     if not config.vad.enabled:
@@ -44,7 +44,7 @@ def create_segmentation_strategy(
             stop_event,
             config,
             vad_model,
-            auto_disable_event,
+            on_auto_disable,
         )
     except ImportError as e:
         logger.warning(
