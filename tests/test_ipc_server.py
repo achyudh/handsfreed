@@ -127,9 +127,6 @@ async def test_start_command_success(
         CliOutputMode.KEYBOARD
     )
 
-    # Check state
-    assert state_manager.current_state == DaemonStateEnum.LISTENING
-
 
 @pytest.mark.asyncio
 async def test_start_command_failure(
@@ -186,9 +183,6 @@ async def test_stop_command_success(
 
     # Verify pipeline manager was called
     pipeline_manager.stop_transcription.assert_awaited_once()
-
-    # Check state
-    assert state_manager.current_state == DaemonStateEnum.IDLE
 
 
 @pytest.mark.asyncio
@@ -258,7 +252,6 @@ async def test_toggle_command_idle_to_listening(
     )
 
     assert response["response_type"] == "ack"
-    assert state_manager.current_state == DaemonStateEnum.LISTENING
     # Should default to keyboard if None provided
     pipeline_manager.start_transcription.assert_awaited_with(CliOutputMode.KEYBOARD)
 
@@ -277,7 +270,6 @@ async def test_toggle_command_listening_to_idle(
     )
 
     assert response["response_type"] == "ack"
-    assert state_manager.current_state == DaemonStateEnum.IDLE
     pipeline_manager.stop_transcription.assert_awaited_once()
 
 
@@ -295,5 +287,4 @@ async def test_toggle_command_with_output_mode(
     )
 
     assert response["response_type"] == "ack"
-    assert state_manager.current_state == DaemonStateEnum.LISTENING
     pipeline_manager.start_transcription.assert_awaited_with(CliOutputMode.CLIPBOARD)

@@ -132,7 +132,6 @@ class IPCServer:
 
         try:
             await self.pipeline_manager.start_transcription(command.output_mode)
-            self.state_manager.set_state(DaemonStateEnum.LISTENING)
             await self._send_response(writer, ResponseWrapper(root=AckResponse()))
         except Exception as e:
             error_msg = f"Failed to start transcription: {e}"
@@ -152,8 +151,6 @@ class IPCServer:
 
         try:
             await self.pipeline_manager.stop_transcription()
-            if self.state_manager.current_state != DaemonStateEnum.ERROR:
-                self.state_manager.set_state(DaemonStateEnum.IDLE)
             await self._send_response(writer, ResponseWrapper(root=AckResponse()))
         except Exception as e:
             error_msg = f"Error stopping transcription: {e}"
@@ -208,12 +205,9 @@ class IPCServer:
         current_state = self.state_manager.current_state
 
         if current_state == DaemonStateEnum.IDLE:
-            # Start
-            # If output mode is None, use default (KEYBOARD)
             mode = command.output_mode or CliOutputMode.KEYBOARD
             try:
                 await self.pipeline_manager.start_transcription(mode)
-                self.state_manager.set_state(DaemonStateEnum.LISTENING)
                 await self._send_response(writer, ResponseWrapper(root=AckResponse()))
             except Exception as e:
                 error_msg = f"Failed to toggle start: {e}"
@@ -224,10 +218,8 @@ class IPCServer:
                 )
 
         elif current_state in (DaemonStateEnum.LISTENING, DaemonStateEnum.PROCESSING):
-            # Stop
             try:
                 await self.pipeline_manager.stop_transcription()
-                self.state_manager.set_state(DaemonStateEnum.IDLE)
                 await self._send_response(writer, ResponseWrapper(root=AckResponse()))
             except Exception as e:
                 error_msg = f"Failed to toggle stop: {e}"

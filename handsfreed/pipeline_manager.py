@@ -91,18 +91,31 @@ class PipelineManager:
 
         logger.info("Auto-disable triggered by segmentation strategy.")
         await self.stop_transcription()
-        self.state_manager.set_state(DaemonStateEnum.IDLE)
 
     async def start_transcription(self, mode: CliOutputMode):
         """Start the transcription process."""
-        await self.audio_capture.start_capture()
-        self.task_assembler.set_output_mode(mode)
-        await self.segmentation_strategy.set_enabled(True)
-        self.output_handler.reset_spacing_state()
+        try:
+            await self.audio_capture.start_capture()
+            self.task_assembler.set_output_mode(mode)
+            await self.segmentation_strategy.set_enabled(True)
+            self.output_handler.reset_spacing_state()
+            self.state_manager.set_state(DaemonStateEnum.LISTENING)
+        except Exception as e:
+            error_msg = f"Failed to start transcription components: {e}"
+            logger.exception(error_msg)
+            self.state_manager.set_error(error_msg)
+            self.state_manager.set_state(DaemonStateEnum.IDLE)  # Revert to idle state
+            raise  # Re-raise to inform the caller (IPCServer)
 
     async def stop_transcription(self):
         """Stop the transcription process."""
-        await self.segmentation_strategy.set_enabled(False)
-        self.task_assembler.set_output_mode(None)
-        await self.audio_capture.stop_capture()
-        self.output_handler.reset_spacing_state()
+        try:
+            await self.segmentation_strategy.set_enabled(False)
+            self.task_assembler.set_output_mode(None)
+            await self.audio_capture.stop_capture()
+            self.output_handler.reset_spacing_state()
+            self.state_manager.set_state(DaemonStateEnum.IDLE)
+        except Exception as e:
+            error_msg = f"Failed to stop transcription components: {e}"
+            logger.exception(error_msg)
+            self.state_manager.set_error(error_msg)

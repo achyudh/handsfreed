@@ -108,23 +108,55 @@ async def pipeline_manager_with_real_vad(mock_config, stop_event):
 
 
 @pytest.mark.asyncio
-async def test_start_transcription_resets_spacing_state(pipeline_manager):
-    """Test start_transcription resets spacing state and configures components."""
+async def test_start_transcription_success(pipeline_manager):
+    """Test start_transcription success path."""
     await pipeline_manager.start_transcription(CliOutputMode.KEYBOARD)
     pipeline_manager.output_handler.reset_spacing_state.assert_called_once()
     pipeline_manager.task_assembler.set_output_mode.assert_called_with(
         CliOutputMode.KEYBOARD
     )
     pipeline_manager.segmentation_strategy.set_enabled.assert_called_with(True)
+    pipeline_manager.state_manager.set_state.assert_called_with(
+        DaemonStateEnum.LISTENING
+    )
 
 
 @pytest.mark.asyncio
-async def test_stop_transcription_resets_spacing_state(pipeline_manager):
-    """Test stop_transcription resets spacing state and stops components."""
+async def test_stop_transcription_success(pipeline_manager):
+    """Test stop_transcription success path."""
     await pipeline_manager.stop_transcription()
     pipeline_manager.output_handler.reset_spacing_state.assert_called_once()
     pipeline_manager.segmentation_strategy.set_enabled.assert_called_with(False)
     pipeline_manager.task_assembler.set_output_mode.assert_called_with(None)
+    pipeline_manager.state_manager.set_state.assert_called_with(DaemonStateEnum.IDLE)
+
+
+@pytest.mark.asyncio
+async def test_start_transcription_failure(pipeline_manager):
+    """Test start_transcription failure handling."""
+    pipeline_manager.audio_capture.start_capture.side_effect = RuntimeError(
+        "Capture failed"
+    )
+
+    with pytest.raises(RuntimeError, match="Capture failed"):
+        await pipeline_manager.start_transcription(CliOutputMode.KEYBOARD)
+
+    pipeline_manager.state_manager.set_error.assert_called()
+    pipeline_manager.state_manager.set_state.assert_called_with(DaemonStateEnum.IDLE)
+
+
+@pytest.mark.asyncio
+async def test_stop_transcription_failure(pipeline_manager):
+    """Test stop_transcription failure handling."""
+    pipeline_manager.audio_capture.stop_capture.side_effect = RuntimeError(
+        "Stop failed"
+    )
+
+    await pipeline_manager.stop_transcription()
+
+    pipeline_manager.state_manager.set_error.assert_called()
+    # Should not set state to IDLE if it fails
+    pipeline_manager.state_manager.set_state.assert_not_called()
 
 
 @pytest.mark.asyncio
