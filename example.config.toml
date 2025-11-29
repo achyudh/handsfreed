@@ -1,69 +1,69 @@
 # Example configuration for handsfreed daemon
 
 [audio]
-# Input gain multiplier. Useful for quiet microphones. (1.0 = no gain)
+# Input gain multiplier (1.0 = no gain).
 # input_gain = 1.5
 
-# Enable/disable DC offset correction. This helps with microphones that have a DC bias.
+# Enable DC offset correction for raw audio.
 dc_offset_correction = true
 
-# Window size (ms) for the running average of the DC offset correction.
+# Window size for DC offset calculation (ms).
 dc_offset_window_ms = 512
 
 
 [whisper]
-# Model to use (supported models: tiny.en, base.en, small.en, medium.en, large)
+# Whisper model identifier (e.g., small.en, medium.en).
 model = "small.en"
 
-# Device to use for inference (auto, cpu, cuda)
+# Device for inference (auto, cpu, cuda).
 device = "auto"
 
-# Compute type for inference (auto, float32, float16, int8)
+# Compute type for inference (auto, float32, float16, int8).
 compute_type = "auto"
 
-# Optional language code (leave empty for auto-detect)
+# Optional language code (empty for auto-detect).
 language = ""
 
-# Beam size for search (1-10, higher is slower but more accurate)
+# Beam size for search (1-10, higher is slower but more accurate).
 beam_size = 5
 
-# Number of CPU threads for inference (0 = auto)
+# Number of CPU threads for inference (0 = auto).
 cpu_threads = 0
 
 [vad]
-# Enable Voice Activity Detection
+# Enable Voice Activity Detection.
 enabled = false
 
-# Threshold for voice detection (0.0-1.0)
+# Speech probability threshold (0.0-1.0).
 threshold = 0.5
 
-# Minimum duration for a speech segment (ms)
+# Minimum duration for a speech segment (ms).
 min_speech_duration_ms = 256
 
-# Minimum duration for a silence segment (ms)
+# Minimum duration of silence to end a speech segment (ms).
 min_silence_duration_ms = 1024
 
-# Pre-roll duration (ms) to include before a detected speech segment.
+# Pre-roll duration to include before a detected speech segment (ms).
 pre_roll_duration_ms = 192
 
-# Optional negative threshold (must be between 0.0 and 1.0)
+# Negative threshold for speech detection (0.0-1.0, optional).
 # neg_threshold = 0.1
 
-# Maximum speech duration in seconds (0 = unlimited)
+# Maximum duration of a single speech segment in seconds (0 = unlimited).
 max_speech_duration_s = 0.0
 
 # Maximum duration in seconds before listening stops (0 = disabled)
 auto_disable_duration_s = 5.0
 
 [output]
-# Command to execute for keyboard output
+# Command to execute for keyboard output.
 keyboard_command = "wtype -"
 
-# Command to execute for clipboard output
+# Command to execute for clipboard output.
 clipboard_command = "wl-copy"
 
 [daemon]
-# Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+# Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
 log_level = "INFO"
 
 # Optional custom log file path
@@ -74,5 +74,5 @@ log_level = "INFO"
 # Default: $XDG_RUNTIME_DIR/handsfree/daemon.sock or /tmp/handsfree-$USER.sock
 # socket_path = "/var/run/handsfree/daemon.sock"
 
-# Time chunk size in seconds for audio processing
+# Duration of audio processing chunks in seconds.
 time_chunk_s = 5.0
