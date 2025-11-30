@@ -207,7 +207,9 @@ class VADSegmentationStrategy(SegmentationStrategy):
         # This ensures the silence timer is fresh when it restarts.
         if not enabled:
             self._current_vad_state = SilentState()
-            logger.debug("VAD state reset to SilentState.")
+            self._pre_roll_buffer.clear()
+            self._current_segment.clear()
+            logger.debug("VAD state and buffers reset.")
 
     async def _consume_item(self, raw_frame: np.ndarray) -> None:
         """Process a single raw audio frame using VAD for speech detection."""

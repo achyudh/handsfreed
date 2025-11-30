@@ -92,9 +92,25 @@ class PipelineManager:
         logger.info("Auto-disable triggered by segmentation strategy.")
         await self.stop_transcription()
 
+    def _purge_input_queues(self):
+        """Purge input queues to remove stale data from previous sessions."""
+        logger.debug("Purging input queues...")
+        while not self.raw_audio_queue.empty():
+            try:
+                self.raw_audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        while not self.segment_queue.empty():
+            try:
+                self.segment_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
     async def start_transcription(self, mode: CliOutputMode):
         """Start the transcription process."""
         try:
+            self._purge_input_queues()
             await self.audio_capture.start_capture()
             self.task_assembler.set_output_mode(mode)
             await self.segmentation_strategy.set_enabled(True)
