@@ -262,3 +262,25 @@ async def test_handle_auto_disable(pipeline_manager):
     pipeline_manager.segmentation_strategy.set_enabled.assert_called_with(False)
     pipeline_manager.task_assembler.set_output_mode.assert_called_with(None)
     pipeline_manager.audio_capture.stop_capture.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_start_transcription_purges_input_queues(pipeline_manager):
+    """Test that starting transcription purges input queues."""
+    # Populate queues with stale data
+    await pipeline_manager.raw_audio_queue.put("stale_audio_1")
+    await pipeline_manager.raw_audio_queue.put("stale_audio_2")
+    await pipeline_manager.segment_queue.put("stale_segment_1")
+
+    assert not pipeline_manager.raw_audio_queue.empty()
+    assert not pipeline_manager.segment_queue.empty()
+
+    # Start transcription
+    await pipeline_manager.start_transcription(CliOutputMode.KEYBOARD)
+
+    # Verify queues are empty
+    assert pipeline_manager.raw_audio_queue.empty()
+    assert pipeline_manager.segment_queue.empty()
+
+    # Verify other calls proceeded
+    pipeline_manager.audio_capture.start_capture.assert_called()

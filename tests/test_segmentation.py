@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import numpy as np
 import pytest
 import pytest_asyncio
-from handsfreed.audio_capture import FRAME_SIZE, SAMPLE_RATE
+from handsfreed.audio_capture import FRAME_SIZE, SAMPLE_RATE, AUDIO_DTYPE
 from handsfreed.pipeline import TranscriptionTask
 from handsfreed.segmentation import (
     FixedSegmentationStrategy,
@@ -100,6 +100,24 @@ async def vad_strategy(
     yield strategy
     # Clean up if needed
     await strategy.stop()
+
+
+@pytest.mark.asyncio
+async def test_vad_strategy_set_enabled_clears_buffers(vad_strategy):
+    """Test that disabling VAD strategy clears internal buffers."""
+    # Populate buffers
+    vad_strategy._pre_roll_buffer.append(np.zeros(10, dtype=AUDIO_DTYPE))
+    vad_strategy._current_segment.append(np.zeros(10, dtype=AUDIO_DTYPE))
+
+    # Enable first (to set _enabled=True)
+    await vad_strategy.set_enabled(True)
+
+    # Disable
+    await vad_strategy.set_enabled(False)
+
+    # Verify buffers are empty
+    assert len(vad_strategy._pre_roll_buffer) == 0
+    assert len(vad_strategy._current_segment) == 0
 
 
 @pytest.mark.asyncio
